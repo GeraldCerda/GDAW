@@ -1253,11 +1253,21 @@ fn route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, input: bool) {
         ui.close();
     }
     if input {
-        for i in 1..=8 {
-            if ui.button(format!("In {i}")).clicked() {
-                let _ = app.run(cmd, json!({"track": id.0, key: format!("In {i}")}));
-                ui.close();
-            }
+        let channels = crate::windows::hardware_input_channels(app, ui.ctx());
+        let width = app.engine.session().track(id).map_or(1, |track| track.channels());
+        ui.strong("Physical inputs");
+        if channels < width {
+            ui.label("No compatible input channels on the selected device");
+        } else {
+            egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                for first in 1..=channels - width + 1 {
+                    let route = if width == 1 { format!("In {first}") } else { format!("In {first}-{}", first + width - 1) };
+                    if ui.button(&route).clicked() {
+                        let _ = app.run(cmd, json!({"track": id.0, key: route}));
+                        ui.close();
+                    }
+                }
+            });
         }
     }
     ui.separator();
