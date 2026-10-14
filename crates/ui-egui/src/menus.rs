@@ -15,9 +15,9 @@ pub const UI_COMMANDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("window.edit", "Edit", "Window > Edit", Some("Cmd+=")),
     ("window.toggle_mix_edit", "Toggle Mix/Edit", "", Some("Cmd+=")),
     ("window.mix_separate", "Mix in Separate Window", "", None),
-    ("window.transport", "Transport", "Window > Transport", Some("Cmd+1")),
-    ("window.big_counter", "Big Counter", "Window > Big Counter", Some("Cmd+3")),
-    ("window.memory_locations", "Memory Locations", "Window > Memory Locations", Some("Cmd+5")),
+    ("window.transport", "Transport", "Window > Transport", Some("Cmd+Numpad1")),
+    ("window.big_counter", "Big Counter", "Window > Big Counter", Some("Cmd+Numpad3")),
+    ("window.memory_locations", "Memory Locations", "Window > Memory Locations", Some("Cmd+Numpad5")),
     ("window.undo_history", "Undo History", "Window > Undo History", None),
     ("window.clip_list", "Clip List", "Window > Clip List", None),
     ("window.track_list", "Track List", "View > Other Displays > Track List", None),
@@ -27,12 +27,12 @@ pub const UI_COMMANDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("window.audio_health", "Session Audio Health", "", None),
     ("window.about", "About SoundCraft", "", None),
     ("window.close", "Close Window", "Window > Close Window", Some("Cmd+W")),
-    ("window.hide_floating", "Hide All Floating Windows", "Window > Hide All Floating Windows", Some("Cmd+Ctrl+W")),
-    ("window.midi_editor", "MIDI Editor", "Window > MIDI Editor", None),
+    ("window.hide_floating", "Hide All Floating Windows", "Window > Hide All Floating Windows", Some("Cmd+Alt+Ctrl+W")),
+    ("window.midi_editor", "MIDI Editor", "Window > MIDI Editor", Some("Ctrl+=")),
     ("window.universe", "Universe", "View > Other Displays > Universe", Some("Alt+7")),
-    ("window.video", "Video", "Window > Video", Some("Cmd+9")),
+    ("window.video", "Video", "Window > Video", Some("Cmd+Numpad9")),
     ("window.video_universe", "Video Universe", "Window > Video Universe", None),
-    ("window.automation", "Automation", "Window > Automation", Some("Cmd+4")),
+    ("window.automation", "Automation", "Window > Automation", Some("Cmd+Numpad4")),
     ("window.color_palette", "Color Palette", "Window > Color Palette", None),
     ("window.disk_usage", "Disk Usage", "Window > Disk Usage", None),
     ("window.system_usage", "System Usage", "Window > System Usage", None),
@@ -59,8 +59,8 @@ pub const UI_COMMANDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("window.midi_back", "MIDI Editors to Back", "Window > MIDI Editors > Send to Back", None),
     ("window.clip_effects", "Clip Effects", "Window > Clip Effects", None),
     ("window.clip_effects_dock", "Clip Effects", "View > Other Displays > Lower Dock > Clip Effects", Some("Alt+6")),
-    ("window.search", "Search", "Window > Pro Tools Search", Some("Cmd+Ctrl+S")),
-    ("window.score", "Score Editor", "Window > Score Editor", Some("Cmd+Ctrl+=")),
+    ("window.search", "Search", "Window > Pro Tools Search", Some("Ctrl+Shift+S")),
+    ("window.score", "Score Editor", "Window > Score Editor", Some("Ctrl+Alt+=")),
     ("window.beat_detective", "Beat Detective", "", None),
     ("window.tempo_ops", "Tempo Operations", "", None),
     ("window.time_ops", "Time Operations", "", None),
@@ -69,12 +69,13 @@ pub const UI_COMMANDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("window.playback_engine", "Playback Engine", "", None),
     ("ui.audio_device", "Audio Device", "", None),
     ("window.io_setup", "I/O Setup", "", None),
-    ("window.shortcuts", "Keyboard Shortcuts", "", None),
+    ("window.shortcuts", "Keyboard Shortcuts", "", Some("Ctrl+Shift+K")),
     ("view.mix_section", "Mix Window View", "", None),
     ("ui.new_tracks_dialog", "New Tracks…", "", None),
     ("ui.bounce_dialog", "Bounce Mix…", "", None),
     ("ui.set", "Set UI State", "", None),
     ("ui.theme", "Appearance", "", None),
+    ("ui.drum_library", "Drum Sample Library", "", None),
 ];
 
 /// Extra catalog mappings handled by the UI layer.
@@ -509,10 +510,24 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
             json!({"window": "edit"})
         }
         "window.toggle_mix_edit" => {
-            app.ui.mix_separate = true;
+            app.ui.mix_separate = !app.ui.mix_separate;
             app.ui.window = MainWindow::Edit;
-            app.focus_mix = true;
-            json!({"window": "mix", "separate": true})
+            app.focus_mix = app.ui.mix_separate;
+            if !app.ui.mix_separate && let Some(ctx) = &app.docking_context {
+                ctx.send_viewport_cmd_to(egui::ViewportId::from_hash_of("soundcraft.mix"), egui::ViewportCommand::Close);
+            }
+            json!({"window": "edit", "mixer_visible": app.ui.mix_separate})
+        }
+        "ui.drum_library" => {
+            let Some(path) = p.get("path").and_then(Value::as_str) else { return Some(Err("path required".into())) };
+            if !path.is_empty() && !std::path::Path::new(path).is_dir() {
+                return Some(Err("Choose an accessible sample folder".into()));
+            }
+            app.ui.drum_library = path.into();
+            app.browser.library_loaded.clear();
+            app.browser.library_files.clear();
+            app.browser.auto_kits.clear();
+            json!({"path": path})
         }
         "window.browser" => toggle(&mut app.ui.show_browser),
         "window.devices" => toggle(&mut app.ui.show_devices),

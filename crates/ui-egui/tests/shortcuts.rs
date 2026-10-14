@@ -66,8 +66,10 @@ fn cmd_equals_toggles_mix_and_edit_without_zooming() {
         ctx.set_os(os);
         ctx.set_zoom_factor(1.25);
         press(&ctx, &mut app, Key::Equals, cmd);
-        assert_eq!(app.ui.window, MainWindow::Mix, "{os:?}");
+        assert_eq!(app.ui.window, MainWindow::Edit, "{os:?}");
+        assert!(app.ui.mix_separate, "{os:?}");
         press(&ctx, &mut app, Key::Equals, cmd);
+        assert!(!app.ui.mix_separate, "{os:?}");
         press(&ctx, &mut app, Key::Num0, cmd);
         press(&ctx, &mut app, Key::Minus, cmd);
         ctx.run_ui(egui::RawInput::default(), |_| {}).textures_delta.clear();

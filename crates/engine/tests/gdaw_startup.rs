@@ -30,3 +30,12 @@ fn the_gdaw_template_and_explicit_blank_template_stay_distinct() {
     engine.execute("session.new", &json!({"template": "blank"})).unwrap();
     assert!(engine.session().tracks.is_empty());
 }
+
+#[test]
+fn startup_grid_exposes_eighth_notes_without_changing_zoom() {
+    let session = starter_session("Grid", SampleRate::HZ_48000);
+    assert_eq!(session.edit.grid.label(), "1/8");
+    assert!(session.edit.grid_lines);
+    let pixels = session.edit.grid.step_samples(0, session.sample_rate, &session.tempo, session.frame_rate) as f64 / session.edit.zoom.samples_per_px;
+    assert!(pixels >= 2.0);
+}

@@ -18,7 +18,7 @@ pub fn specs() -> Vec<CommandSpec> {
             e.zoom_mut().samples_per_px = v;
             Ok(json!({"samples_per_px": v}))
         }),
-        cmd!(view "view.zoom_preset", "Zoom Preset", [], Some("Cmd+Ctrl+1-5"), "{preset: 1..5, store?: bool}", always, |e, p| {
+        cmd!(view "view.zoom_preset", "Zoom Preset", [], Some("Ctrl+1-5"), "{preset: 1..5, store?: bool}", always, |e, p| {
             let i = (i64_or(p, "preset", 1).clamp(1, 5) - 1) as usize;
             let z = e.zoom_mut();
             if bool_or(p, "store", false) {

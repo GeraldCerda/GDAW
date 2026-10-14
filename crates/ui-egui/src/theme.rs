@@ -3,8 +3,7 @@
 use egui::{Color32, FontFamily, FontId};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Whether the Light palette is active. Dark is the default (the incumbent is dark-only).
-static LIGHT_THEME: AtomicBool = AtomicBool::new(false);
+static LIGHT_THEME: AtomicBool = AtomicBool::new(true);
 
 /// Unit tests that change or read the process-wide palette must own it until their assertions
 /// finish. The lock is re-entrant per thread, so a test may hold it and still build apps
@@ -66,13 +65,12 @@ mod palette_lock {
     }
 }
 
-/// The Appearance setting (`ui.theme {mode}`). Dark by default; System and Light are opt-in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThemeMode {
     System,
-    Light,
     #[default]
+    Light,
     Dark,
 }
 
@@ -507,12 +505,11 @@ mod tests {
     }
 
     #[test]
-    fn dark_is_the_default() {
-        assert_eq!(ThemeMode::default(), ThemeMode::Dark);
-        assert_eq!(UiState::default().theme, ThemeMode::Dark);
-        // Prefs saved before the setting existed load as Dark.
+    fn light_is_the_default() {
+        assert_eq!(ThemeMode::default(), ThemeMode::Light);
+        assert_eq!(UiState::default().theme, ThemeMode::Light);
         let old: UiState = serde_json::from_value(json!({"show_tracks_list": true})).unwrap_or_default();
-        assert_eq!(old.theme, ThemeMode::Dark);
+        assert_eq!(old.theme, ThemeMode::Light);
     }
 
     #[test]

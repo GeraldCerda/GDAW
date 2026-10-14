@@ -49,9 +49,8 @@ fn mods_match(want: Modifiers, got: Modifiers, mac: bool) -> bool {
     want.command == got.command && want.shift == got.shift && want.alt == got.alt && ctrl
 }
 
-/// Cmd+Ctrl+S opens Search. Off macOS Ctrl+S is Save (Cmd+S), so Search is reached from the Window menu.
 fn search_chord(m: Modifiers, mac: bool) -> bool {
-    mac && m.command && m.ctrl
+    mac && m.ctrl && m.shift && !m.command && !m.alt
 }
 
 pub fn handle(app: &mut SoundApp, ctx: &egui::Context) {
@@ -62,9 +61,9 @@ pub fn handle(app: &mut SoundApp, ctx: &egui::Context) {
     let mac = ctx.os() == egui::os::OperatingSystem::Mac;
     let mixer_key = |event: &egui::Event| matches!(event,
         egui::Event::Key { key: Key::Equals | Key::Plus, pressed: true, repeat: false, modifiers, .. }
-        if modifiers.command && !modifiers.alt && !(mac && modifiers.ctrl));
+        if modifiers.command && !modifiers.alt && !modifiers.shift && !(mac && modifiers.ctrl));
     if ctx.input(|input| input.events.iter().any(mixer_key)) {
-        let _ = app.run("window.mix", json!({}));
+        let _ = app.run("window.toggle_mix_edit", json!({}));
         ctx.input_mut(|input| input.events.retain(|event| !mixer_key(event)));
     }
     if ctx.egui_wants_keyboard_input() {
@@ -90,7 +89,7 @@ pub fn handle(app: &mut SoundApp, ctx: &egui::Context) {
             }
             let _ = app.run(id, json!({}));
         } else if let Some(c) =
-            crate::menus::UI_COMMANDS.iter().find(|c| c.3.and_then(parse).is_some_and(|(m, k)| k == key && mods_match(m, mods, mac)))
+            crate::menus::UI_COMMANDS.iter().find(|c| c.3.and_then(|shortcut| parse(&if mac { shortcut.into() } else { shortcut.replace("Numpad", "") })).is_some_and(|(m, k)| k == key && mods_match(m, mods, mac)))
         {
             let _ = app.run(c.0, json!({}));
         }
@@ -127,8 +126,68 @@ fn fixed(app: &mut SoundApp, key: Key, m: Modifiers, mac: bool) -> bool {
             let _ = app.run("window.toggle_mix_edit", json!({}));
             true
         }
-        Key::Enter if plain => {
+        Key::Enter if m.command && !m.ctrl && !m.alt && !m.shift => {
             let _ = app.run("markers.add", json!({}));
+            true
+        }
+        Key::Enter if !m.command && !m.ctrl => {
+            if m.shift {
+                let session = app.engine.session();
+                let range = session.edit.selection;
+                let end = if m.alt { session.content_end() } else { 0 };
+                let _ = app.run("edit.select", json!({"start": range.start.min(end), "end": range.end.max(end), "exact": true}));
+            } else {
+                let _ = app.run(if m.alt { "transport.go_to_end" } else { "transport.rtz" }, json!({}));
+            }
+            true
+        }
+        Key::Num1 | Key::Num2 | Key::Num3 | Key::Num4 | Key::Num5 | Key::Num6 | Key::Num7
+            if mac && m.command && !m.ctrl && !m.alt && !m.shift =>
+        {
+            let tool = match key {
+                Key::Num1 => "zoom",
+                Key::Num2 => "trim",
+                Key::Num3 => "selector",
+                Key::Num4 => "grabber",
+                Key::Num5 => "scrubber",
+                Key::Num6 => "pencil",
+                _ => "smart",
+            };
+            let _ = app.run("edit.tool", json!({"tool": tool}));
+            true
+        }
+        Key::Num1 | Key::Num2 | Key::Num3 if m.command && m.alt && !m.ctrl && !m.shift => {
+            let focus = match key { Key::Num1 => "commands", Key::Num2 => "clips", _ => "groups" };
+            let _ = app.run("options.keyboard_focus", json!({"focus": focus}));
+            true
+        }
+        Key::A if m.alt && !m.command && !m.shift => {
+            let width = (app.edit_layout.timeline[2] - app.edit_layout.timeline[0]).max(100.0);
+            let _ = app.run("view.zoom_fit", json!({"width_px": width}));
+            if !m.ctrl {
+                let _ = app.run("view.waveform_zoom", json!({"value": 1.0}));
+            }
+            true
+        }
+        Key::OpenBracket | Key::CloseBracket if mac && m.command && m.ctrl && !m.alt && !m.shift => {
+            let width = (app.edit_layout.timeline[2] - app.edit_layout.timeline[0]).max(100.0);
+            let _ = app.run(if key == Key::OpenBracket { "view.zoom_fit" } else { "view.zoom_to_selection" }, json!({"width_px": width}));
+            true
+        }
+        Key::E if mac && m.ctrl && !m.command && !m.alt && !m.shift => {
+            crate::edit_window::zoom_toggle(app);
+            true
+        }
+        Key::Escape if plain && app.gesture.is_none() => {
+            let tool = match app.engine.session().edit.tool {
+                soundcraft_model::Tool::Zoom => "trim",
+                soundcraft_model::Tool::Trim => "selector",
+                soundcraft_model::Tool::Selector => "grabber",
+                soundcraft_model::Tool::Grabber | soundcraft_model::Tool::Smart => "scrubber",
+                soundcraft_model::Tool::Scrubber => "pencil",
+                soundcraft_model::Tool::Pencil => "zoom",
+            };
+            let _ = app.run("edit.tool", json!({"tool": tool}));
             true
         }
         // Shift+=/- step the Grid value and Alt+Shift+=/- the Nudge value; macOS sends Alt+Shift+= as =, not +.
@@ -160,15 +219,30 @@ fn fixed(app: &mut SoundApp, key: Key, m: Modifiers, mac: bool) -> bool {
             true
         }
         Key::F5 | Key::F6 | Key::F7 | Key::F8 | Key::F9 | Key::F10 if plain => {
-            let tool = match key {
+            let held = |other| app.docking_context.as_ref().is_some_and(|ctx| ctx.input(|input| input.key_down(other)));
+            let tool = if matches!(key, Key::F6 | Key::F7 | Key::F8)
+                && ((key == Key::F6 && held(Key::F7)) || (key == Key::F7 && (held(Key::F6) || held(Key::F8))) || (key == Key::F8 && held(Key::F7)))
+            {
+                "smart"
+            } else { match key {
                 Key::F5 => "zoom",
                 Key::F6 => "trim",
                 Key::F7 => "selector",
                 Key::F8 => "grabber",
                 Key::F9 => "scrubber",
                 _ => "pencil",
-            };
+            }};
             let _ = app.run("edit.tool", json!({"tool": tool}));
+            true
+        }
+        Key::Minus if plain && app.ui.window == MainWindow::Edit && app.engine.session().edit.keyboard_focus == "commands" => {
+            let tracks: Vec<_> = app.engine.session().edit.selected_tracks.iter().filter_map(|id| app.engine.session().track(*id)).map(|track| {
+                let view = if track.kind.is_midi() { if track.view == "notes" { "regions" } else { "notes" } } else if track.view == "waveform" { "volume" } else { "waveform" };
+                (track.id, view)
+            }).collect();
+            for (track, view) in tracks {
+                let _ = app.run("track.view", json!({"tracks": [track.0], "view": view}));
+            }
             true
         }
         Key::Plus | Key::Minus if !m.command && app.ui.window == MainWindow::Edit => {
@@ -188,11 +262,11 @@ fn fixed(app: &mut SoundApp, key: Key, m: Modifiers, mac: bool) -> bool {
             let _ = app.run("view.waveform_zoom", json!({"factor": factor}));
             true
         }
-        Key::Num0 | Key::Num1 | Key::Num2 | Key::Num3 | Key::Num4 | Key::Num5 if mods_match(Modifiers::COMMAND | Modifiers::ALT, m, mac) => {
+        Key::Num0 | Key::Num4 | Key::Num5 if mods_match(Modifiers::COMMAND | Modifiers::ALT, m, mac) => {
             let _ = app.run("clip.rating", json!({"rating": digit(key)}));
             true
         }
-        Key::Num1 | Key::Num2 | Key::Num3 | Key::Num4 | Key::Num5 if mods_match(Modifiers::COMMAND | Modifiers::CTRL, m, mac) => {
+        Key::Num1 | Key::Num2 | Key::Num3 | Key::Num4 | Key::Num5 if mac && m.ctrl && !m.alt && !m.shift => {
             let _ = app.run("view.zoom_preset", json!({"preset": digit(key)}));
             true
         }
@@ -223,12 +297,6 @@ fn fixed(app: &mut SoundApp, key: Key, m: Modifiers, mac: bool) -> bool {
             && app.engine.session().edit.keyboard_focus == "commands"
             && commands_focus(app, k, m.shift) =>
         {
-            true
-        }
-        Key::R | Key::T if plain => {
-            // Zoom out / in on the timeline (Commands Focus style).
-            let id = if key == Key::T { "view.zoom_in" } else { "view.zoom_out" };
-            let _ = app.run(id, json!({}));
             true
         }
         _ => false,
@@ -304,6 +372,8 @@ fn commands_focus(app: &mut SoundApp, key: Key, shift: bool) -> bool {
         Key::P if shift => "edit.extend_selection_up",
         Key::Semicolon | Key::Colon if shift => "edit.extend_selection_down",
         _ if shift => return false,
+        Key::R => "view.zoom_out",
+        Key::T => "view.zoom_in",
         Key::A => "edit.trim_start_to_insertion",
         Key::S => "edit.trim_end_to_insertion",
         Key::D => "edit.fade_to_start",
@@ -454,7 +524,8 @@ mod tests {
         assert!(mods_match(want("Cmd+Ctrl+X"), Modifiers { ctrl: true, ..MAC_CMD }, true));
         assert!(!mods_match(want("Cmd+X"), Modifiers { ctrl: true, ..MAC_CMD }, true), "Cmd+Ctrl+X is not Cut");
         assert!(!search_chord(MAC_CMD, true));
-        assert!(search_chord(Modifiers { ctrl: true, ..MAC_CMD }, true));
+        assert!(!search_chord(Modifiers { ctrl: true, ..MAC_CMD }, true));
+        assert!(search_chord(Modifiers { ctrl: true, shift: true, ..Modifiers::NONE }, true));
     }
 
     #[test]

@@ -123,8 +123,10 @@ pub struct UiState {
     pub show_video_universe: bool,
     pub video_burn_in: bool,
     pub workspace_dir: String,
+    pub drum_library: String,
+    #[serde(default)]
+    pub appearance_revision: u8,
     pub configurations: Vec<(String, Value)>,
-    /// Appearance (`ui.theme`): dark by default, light or follow the system on request.
     pub theme: theme::ThemeMode,
     /// The main window's size (logical points) and maximized state, and the interface scale, as
     /// the desktop app last saw them; it restores them at launch.
@@ -188,8 +190,10 @@ impl Default for UiState {
             show_video_universe: false,
             video_burn_in: false,
             workspace_dir: String::new(),
+            drum_library: String::new(),
+            appearance_revision: 1,
             configurations: Vec::new(),
-            theme: theme::ThemeMode::Dark,
+            theme: theme::ThemeMode::Light,
             window_size: [1600.0, 1000.0],
             window_maximized: false,
             ui_scale: 1.0,
@@ -1093,6 +1097,7 @@ impl SoundApp {
                     self.edit_layout.follow_hold = false;
                     self.meters.clear();
                     self.main_meter = MeterDisplay::default();
+                    self.browser.auto_kits.clear();
                 }
                 TransportRequest::Play => {
                     if !self.is_playing() {
@@ -1222,6 +1227,11 @@ impl SoundApp {
                 ctx.request_repaint();
             }
         }
+        if self.ui.appearance_revision == 0 {
+            self.ui.theme = theme::ThemeMode::Light;
+            self.ui.appearance_revision = 1;
+        }
+        crate::devices::prepare_drum_library(self);
         let light = theme::wants_light(ctx, self.ui.theme);
         if self.theme_applied != Some(light) || theme::is_light() != light {
             theme::apply(ctx, light);

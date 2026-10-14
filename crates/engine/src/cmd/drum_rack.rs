@@ -5,6 +5,7 @@ use soundcraft_model::{Insert, SourceId, TrackKind};
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
+        cmd!("mix.drum_kit_load", "Load Drum Kit", [], None, "{track?, paths: [audio paths], replace?: false}", has_selection, kit),
         cmd!("mix.drum_pad_load", "Load Drum Pad", [], None, "{track?, note: 36..51, path?|source?}", has_selection, load),
         cmd!(noundo "mix.drum_pad_audition", "Audition Drum Pad", [], None, "{track?, note: 36..51}", has_selection, audition),
         cmd!("mix.drum_pad_clear", "Clear Drum Pad", [], None, "{track?, note: 36..51}", has_selection, clear),
@@ -19,6 +20,33 @@ fn target(engine: &Engine, params: &Value, command: &str) -> Result<(TrackId, u8
         .and_then(|track| track.instrument.as_ref()).filter(|insert| insert.plugin == "drum_rack")
         .cloned().ok_or_else(|| bad(command, "the track must have a Drum Rack instrument"))?;
     Ok((track, note, insert))
+}
+
+fn kit(engine: &mut Engine, params: &Value) -> Result<Value> {
+    let paths = params.get("paths").and_then(Value::as_array).filter(|paths| !paths.is_empty() && paths.len() <= 16)
+        .ok_or_else(|| bad("mix.drum_kit_load", "provide 1..16 audio paths"))?;
+    let paths = paths.iter().map(|path| path.as_str().filter(|path| !path.is_empty()).ok_or_else(|| bad("mix.drum_kit_load", "each path must be a nonempty string"))).collect::<Result<Vec<_>>>()?;
+    let mut target_params = params.clone();
+    if let Some(object) = target_params.as_object_mut() {
+        object.insert("note".into(), json!(36));
+    }
+    let (track, _, mut insert) = target(engine, &target_params, "mix.drum_kit_load")?;
+    if bool_or(params, "replace", false) {
+        insert.pad_samples.clear();
+        if let Some(track) = engine.session_mut().track_mut(track) {
+            track.instrument = Some(insert);
+        }
+    }
+    let mut loaded = 0usize;
+    for (index, path) in paths.iter().enumerate() {
+        let note = 36 + index as u8;
+        if !bool_or(params, "replace", false) && engine.session().track(track).and_then(|track| track.instrument.as_ref()).is_some_and(|insert| insert.pad_samples.contains_key(&note)) {
+            continue;
+        }
+        load(engine, &json!({"track": track.0, "note": note, "path": path}))?;
+        loaded += 1;
+    }
+    Ok(json!({"track": track, "loaded": loaded}))
 }
 
 fn load(engine: &mut Engine, params: &Value) -> Result<Value> {
@@ -146,5 +174,34 @@ mod tests {
         assert!(engine.execute("mix.drum_pad_load", &json!({"track": track.0, "note": 200, "source": source.0})).is_err());
         assert!(engine.execute("clip.clear", &json!({"sources": [source.0], "with_clips": true})).is_err());
         let _ = std::fs::remove_dir_all(folder);
+    }
+}
+
+#[cfg(test)]
+mod kit_tests {
+    use super::*;
+    use soundcraft_audio_io::{AudioBuffer, BitDepth, EncodeOptions, FileFormat};
+
+    #[test]
+    fn kit_loading_is_one_undo_step_and_failed_replacements_restore_the_pads() {
+        let mut engine = Engine::new(crate::starter_session("Kit", soundcraft_time::SampleRate::HZ_48000));
+        let track = engine.session().track_by_name("MIDI 1").unwrap().id;
+        let folder = std::env::temp_dir().join(format!("gdaw-kit-load-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let sample = folder.join("sample.wav");
+        let audio = AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.5; 480]] };
+        let options = EncodeOptions { format: FileFormat::Wav, bit_depth: BitDepth::Int16, dither: false, bwf: None };
+        std::fs::write(&sample, soundcraft_audio_io::encode(&audio, &options).unwrap()).unwrap();
+        let before = engine.session().clone();
+        let steps = engine.undo_history().len();
+        engine.execute("mix.drum_kit_load", &json!({"track": track.0, "paths": [sample, sample]})).unwrap();
+        assert_eq!(engine.session().track(track).unwrap().instrument.as_ref().unwrap().pad_samples.len(), 2);
+        assert_eq!(engine.undo_history().len(), steps + 1);
+        let loaded = engine.session().clone();
+        assert!(engine.execute("mix.drum_kit_load", &json!({"track": track.0, "paths": [sample, folder.join("missing.wav")], "replace": true})).is_err());
+        assert_eq!(engine.session(), &loaded);
+        engine.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(engine.session(), &before);
+        std::fs::remove_dir_all(folder).unwrap();
     }
 }

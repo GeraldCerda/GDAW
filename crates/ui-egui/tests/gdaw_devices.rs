@@ -64,3 +64,30 @@ fn headless_editor_does_not_start_native_plugin_discovery() {
     assert!(!harness.state().browser.plugins_loaded);
     assert!(harness.state().browser.plugin_scan.is_none());
 }
+
+#[test]
+fn mixer_toggle_hides_and_reopens_without_leaving_edit() {
+    let mut harness = harness();
+    for visible in [true, false, true] {
+        harness.state_mut().run("window.toggle_mix_edit", json!({})).unwrap();
+        assert_eq!(harness.state().ui.mix_separate, visible);
+        assert_eq!(harness.state().ui.window, MainWindow::Edit);
+    }
+}
+
+#[test]
+fn drum_library_setting_round_trips_without_loading_samples_when_unassigned() {
+    let mut harness = harness();
+    let before = harness.state().engine.session().clone();
+    soundcraft_ui_egui::devices::prepare_drum_library(harness.state_mut());
+    assert_eq!(harness.state().engine.session(), &before);
+    let root = std::env::temp_dir().join(format!("gdaw-empty-library-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    harness.state_mut().run("ui.drum_library", json!({"path": root.to_string_lossy()})).unwrap();
+    soundcraft_ui_egui::devices::prepare_drum_library(harness.state_mut());
+    assert!(harness.state().browser.library_files.is_empty());
+    let saved = serde_json::to_value(&harness.state().ui).unwrap();
+    let restored: soundcraft_ui_egui::UiState = serde_json::from_value(saved).unwrap();
+    assert_eq!(restored.drum_library, root.to_string_lossy());
+    std::fs::remove_dir(root).unwrap();
+}

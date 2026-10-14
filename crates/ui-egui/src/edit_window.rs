@@ -1502,11 +1502,11 @@ fn grid_lines(painter: &egui::Painter, s: &Session, tl: Rect, lane: Rect) {
     }
     if s.edit.grid_lines {
         let step_px = s.edit.grid.step_samples(view.start, sr, &s.tempo, s.frame_rate) as f64 / s.edit.zoom.samples_per_px;
-        if step_px > 7.0 {
+        if step_px >= 2.0 {
             let col = grid_veil(t.grid_line, t.playlist_bg);
-            for at in s.edit.grid.lines(view.start, view.end, sr, &s.tempo, s.frame_rate, 2000) {
+            for at in s.edit.grid.lines(view.start, view.end, sr, &s.tempo, s.frame_rate, 4096) {
                 let x = x_of(s, tl, at);
-                painter.line_segment([pos2(x, lane.min.y), pos2(x, lane.max.y)], Stroke::new(1.0, col));
+                painter.line_segment([pos2(x, lane.min.y), pos2(x, lane.max.y)], Stroke::new(0.5, col));
             }
         }
     }
@@ -2051,6 +2051,7 @@ fn lane_interaction(app: &mut SoundApp, ui: &mut Ui, track: &Track, lane: Rect, 
             Tool::Trim => egui::CursorIcon::ResizeHorizontal,
             Tool::Grabber => egui::CursorIcon::Grab,
             Tool::Selector => egui::CursorIcon::Text,
+            Tool::Zoom if mods.alt => egui::CursorIcon::ZoomOut,
             Tool::Zoom => egui::CursorIcon::ZoomIn,
             Tool::Pencil => egui::CursorIcon::Crosshair,
             _ => egui::CursorIcon::Default,
