@@ -126,6 +126,7 @@ pub struct Recorder {
     shared: Arc<Shared>,
     /// Live input for monitoring (always fed while the input stream runs).
     pub monitor: Arc<InputRing>,
+    input_peaks: Arc<Vec<AtomicU32>>,
     #[cfg(not(target_os = "freebsd"))]
     _stream: Option<cpal::Stream>,
     pub device_name: String,
@@ -145,6 +146,7 @@ fn build_input<T>(
     config: &cpal::StreamConfig,
     shared: &Arc<Shared>,
     monitor: &Arc<InputRing>,
+    peaks: &Arc<Vec<AtomicU32>>,
 ) -> Result<cpal::Stream, cpal::BuildStreamError>
 where
     T: cpal::SizedSample,
@@ -154,6 +156,9 @@ where
     use cpal::traits::DeviceTrait;
     let (sh, errors) = (Arc::clone(shared), Arc::clone(shared));
     let mon = Arc::clone(monitor);
+    let levels = Arc::clone(peaks);
+    let channels = usize::from(config.channels).max(1);
+    let mut block_peaks = vec![0.0f32; channels];
     let mut scratch = vec![0.0f32; 8192 * usize::from(config.channels).max(1)];
     let chunk = scratch.len();
     let mut owed = 0;
@@ -164,8 +169,15 @@ where
             sh.guarded(|| {
                 for part in data.chunks(chunk) {
                     let Some(s) = scratch.get_mut(..part.len()) else { return };
-                    for (o, x) in s.iter_mut().zip(part) {
-                        *o = f32::from_sample(*x);
+                    block_peaks.fill(0.0);
+                    for (index, (o, x)) in s.iter_mut().zip(part).enumerate() {
+                        let value = finite(f32::from_sample(*x));
+                        *o = value;
+                        let channel = index % channels;
+                        block_peaks[channel] = block_peaks[channel].max(value.abs());
+                    }
+                    for (level, peak) in levels.iter().zip(&block_peaks) {
+                        level.fetch_max(peak.min(1.0).to_bits(), Ordering::Relaxed);
                     }
                     mon.push(s);
                     if sh.armed.load(Ordering::Acquire) {
@@ -228,10 +240,11 @@ impl Recorder {
         let ring = CaptureRing::new((config.sample_rate.0 as usize).saturating_mul(channels * RING_SECONDS).min(1 << 25));
         let shared = Arc::new(Shared::new(ring));
         let monitor = InputRing::new(usize::from(config.channels), config.sample_rate.0);
+        let peaks = Arc::new((0..channels).map(|_| AtomicU32::new(0)).collect::<Vec<_>>());
         let build = |config: &cpal::StreamConfig| match format {
-            cpal::SampleFormat::I32 => build_input::<i32>(&device, config, &shared, &monitor),
-            cpal::SampleFormat::I16 => build_input::<i16>(&device, config, &shared, &monitor),
-            _ => build_input::<f32>(&device, config, &shared, &monitor),
+            cpal::SampleFormat::I32 => build_input::<i32>(&device, config, &shared, &monitor, &peaks),
+            cpal::SampleFormat::I16 => build_input::<i16>(&device, config, &shared, &monitor, &peaks),
+            _ => build_input::<f32>(&device, config, &shared, &monitor, &peaks),
         };
         // The chosen buffer size first; if the device refuses it, its default.
         let stream = match build(&config) {
@@ -245,12 +258,16 @@ impl Recorder {
         };
         stream.play().map_err(|e| e.to_string())?;
         let seen = (0, Instant::now());
-        Ok(Recorder { monitor, shared, _stream: Some(stream), device_name: name, sample_rate: config.sample_rate.0, channels, writer: None, seen })
+        Ok(Recorder { monitor, input_peaks: peaks, shared, _stream: Some(stream), device_name: name, sample_rate: config.sample_rate.0, channels, writer: None, seen })
     }
 
     #[cfg(target_os = "freebsd")]
     pub fn open_with(_audio: &crate::AudioConfig) -> Result<Recorder, String> {
         Err("recording is not supported on this platform yet".into())
+    }
+
+    pub fn take_input_peaks(&self) -> Vec<f32> {
+        self.input_peaks.iter().map(|peak| f32::from_bits(peak.swap(0, Ordering::Relaxed))).collect()
     }
 
     /// Create each take's file and start recording into them: a track's take records the given
