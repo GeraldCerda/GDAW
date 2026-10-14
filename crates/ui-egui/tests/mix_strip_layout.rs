@@ -18,7 +18,7 @@ fn mix(mode: ThemeMode) -> Harness<'static, SoundApp> {
     for track in &mut app.engine.session_mut().tracks {
         track.mixer.volume_db = -144.0;
     }
-    app.run("window.mix", json!({})).unwrap();
+    app.ui.window = soundcraft_ui_egui::MainWindow::Mix;
     app.run("ui.theme", json!({"mode": mode.id()})).unwrap();
     let mut harness = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_ui_state(
         |ui, app: &mut SoundApp| {

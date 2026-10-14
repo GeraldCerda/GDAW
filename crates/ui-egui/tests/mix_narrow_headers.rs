@@ -8,7 +8,7 @@ const SHORT: [&str; 6] = ["I A-E", "I F-J", "S A-E", "S F-J", "INST", "nogrp"];
 
 fn painted_labels(narrow: bool) -> Vec<(String, f32, bool)> {
     let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
-    app.run("window.mix", json!({})).unwrap();
+    app.ui.window = soundcraft_ui_egui::MainWindow::Mix;
     app.run("view.mix_section", json!({"section": "all"})).unwrap();
     app.run("view.mix_section", json!({"section": "instruments"})).unwrap();
     app.ui.narrow_mix = narrow;

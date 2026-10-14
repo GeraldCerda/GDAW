@@ -27,8 +27,8 @@ type Column = (&'static str, &'static str, &'static str, f32);
 
 const COLUMNS: [Column; 7] = [
     ("instruments", "Instruments", "INSTRUMENT", PLUGIN_COLUMN_W),
-    ("inserts_ae", "Inserts A-E", "INSERTS A-E", PLUGIN_COLUMN_W),
-    ("inserts_fj", "Inserts F-J", "INSERTS F-J", PLUGIN_COLUMN_W),
+    ("inserts_ae", "Inserts A-E", "INSERTS A-E", 92.0),
+    ("inserts_fj", "Inserts F-J", "INSERTS F-J", 92.0),
     ("sends_ae", "Sends A-E", "SENDS A-E", PLUGIN_COLUMN_W),
     ("sends_fj", "Sends F-J", "SENDS F-J", PLUGIN_COLUMN_W),
     ("io", "I/O", "I/O", 94.0),
@@ -955,6 +955,10 @@ fn track_header(app: &mut SoundApp, ui: &mut Ui, track: &Track, head: Rect, sele
         click_track(app, id, ui.input(|i| i.modifiers), in_edit_window);
     }
     bg.context_menu(|ui| track_context_menu(app, ui, id));
+    if let Some(item) = bg.dnd_release_payload::<crate::devices::BrowserItem>() {
+        let _ = app.run("edit.select", json!({"tracks": [id.0]}));
+        crate::devices::insert_item(app, id, &item);
+    }
     let at = |x: f32, y: f32, w: f32, h: f32| Rect::from_min_size(pos2(head.min.x + x, head.min.y + y), vec2(w, h));
     let strip = rgb(track.color);
     let ink = shade(strip, -0.8);
@@ -1347,38 +1351,72 @@ fn io_column(app: &mut SoundApp, ui: &mut Ui, track: &Track, r: Rect) {
             ui.painter().text(pos2(vr.max.x - 6.5, vr.min.y + y), Align2::RIGHT_CENTER, value, bold(10.0), ink);
         }
         ui.painter().hline(vr.min.x + 7.0..=vr.max.x - 6.0, vr.min.y + 14.5, Stroke::new(1.0, Color32::from_gray(35)));
+        let volume_rect = vr.with_max_y(vr.center().y);
+        let volume = ui.interact(volume_rect, ui.id().with(("edit-volume", id.0)), Sense::click());
+        volume.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("{} Volume", track.name)));
+        let volume = volume.on_hover_text("Volume · click for fader · Option-click to reset");
+        if volume.clicked() && ui.input(|input| input.modifiers.alt) {
+            let _ = app.run("mix.volume", json!({"track": id.0, "db": 0.0}));
+        } else {
+            egui::Popup::menu(&volume).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+                ui.strong(format!("{} · Volume", track.name));
+                let (fader_rect, _) = ui.allocate_exact_size(vec2(58.0, 160.0), Sense::hover());
+                if let Some(db) = crate::widgets::fader(ui, fader_rect, m.volume_db, ui.id().with(("edit-fader", id.0))) {
+                    app.gesture = Some(Gesture::Fader { track: id, start_db: m.volume_db });
+                    let _ = app.engine.execute_merged("mix.volume", &json!({"track": id.0, "db": db}), &format!("fader:{}", id.0));
+                }
+                let mut db = m.volume_db;
+                if ui.add(egui::DragValue::new(&mut db).range(-144.0..=12.0).speed(0.1).suffix(" dB")).changed() {
+                    let _ = app.engine.execute_merged("mix.volume", &json!({"track": id.0, "db": db}), &format!("fader:{}", id.0));
+                }
+            });
+        }
+        let pan_rect = vr.with_min_y(vr.center().y);
+        let pan = ui.interact(pan_rect, ui.id().with(("edit-pan", id.0)), Sense::click());
+        pan.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("{} Pan", track.name)));
+        egui::Popup::menu(&pan.on_hover_text("Pan · click to adjust each channel")).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+            ui.strong(format!("{} · Pan", track.name));
+            for (index, value) in m.pan.iter().copied().enumerate().take(2) {
+                let mut value = value;
+                let label = if m.pan.len() == 1 { "Pan" } else if index == 0 { "Left" } else { "Right" };
+                if ui.add(egui::Slider::new(&mut value, -1.0..=1.0).text(label)).changed() {
+                    let _ = app.engine.execute_merged("mix.pan", &json!({"track": id.0, "index": index, "pan": value}), &format!("pan:{}:{index}", id.0));
+                }
+            }
+        });
     }
 }
 
-/// Inserts, sends or the instrument, laid out as Pro Tools does: 15-point cells every 18 points
-/// on a neutral well, or on tracks too short for three of them, a row of squares.
+fn plugin_cells(r: Rect) -> Vec<Rect> {
+    if r.height() < 12.0 || r.width() < 20.0 {
+        return Vec::new();
+    }
+    let inner = r.shrink2(vec2(4.0, 1.0));
+    let (columns, rows) = if inner.height() >= 65.0 { (1, 5) } else if inner.height() >= 28.0 { (3, 2) } else { (5, 1) };
+    let width = (inner.width() - 3.0 * (columns - 1) as f32) / columns as f32;
+    let step = (inner.height() / rows as f32).min(18.0);
+    (0..5).map(|index| Rect::from_min_size(
+        inner.min + vec2((index % columns) as f32 * (width + 3.0), (index / columns) as f32 * step),
+        vec2(width, (step - 2.0).clamp(8.0, 15.0)),
+    )).collect()
+}
+
 fn plugin_column(app: &mut SoundApp, ui: &mut Ui, track: &Track, col: &str, r: Rect) {
     let t = Tokens::current();
     ui.painter().rect_filled(r, 0.0, t.slot_well);
-    let rows = if r.height() < 16.0 { 0 } else { ((r.height() - 16.0) / 18.0) as usize + 1 };
-    let cell = |row: usize| Rect::from_min_size(pos2(r.min.x + 4.0, r.min.y + 1.0 + row as f32 * 18.0), vec2(r.width() - 8.0, 15.0));
-    let square = |i: usize, row: usize| Rect::from_min_size(cell(row).min + vec2(i as f32 * 14.0, 0.0), vec2(10.0, 15.0));
+    ui.painter().vline(r.min.x, r.y_range(), Stroke::new(1.0, t.border));
     let mut ui = column_ui(ui, col, r);
     if col == "instruments" {
-        if rows > 0 && track.kind == TrackKind::Instrument {
-            crate::mix_window::instrument_slot(app, &mut ui, track, cell(0));
+        if r.height() >= 16.0 && track.kind == TrackKind::Instrument {
+            let cell = Rect::from_min_size(r.min + vec2(4.0, 1.0), vec2(r.width() - 8.0, 15.0));
+            crate::mix_window::instrument_slot(app, &mut ui, track, cell);
         }
         return;
     }
     let off = if col.ends_with("ae") { 0 } else { 5 };
     let slot = if col.starts_with("inserts") { crate::mix_window::insert_slot } else { crate::mix_window::send_slot };
-    let n = match rows {
-        0 => 0,
-        1 | 2 => 5,
-        _ => rows.min(5),
-    };
-    for i in 0..n {
-        slot(app, &mut ui, track, off + i, if rows < 3 { square(i, 0) } else { cell(i) });
-    }
-    if rows == 2 {
-        for i in 0..5 {
-            ui.painter().rect_filled(square(i, 1), 1.5, t.slot_empty);
-        }
+    for (index, cell) in plugin_cells(r).into_iter().enumerate() {
+        slot(app, &mut ui, track, off + index, cell);
     }
 }
 
@@ -3933,5 +3971,30 @@ mod tests {
         let points = s.track_by_name("Kick").and_then(|t| t.lane(&param)).map(|l| l.points.clone()).unwrap_or_default();
         assert_eq!(points.len(), 1, "status: {}", h.state().ui.status);
         assert!((points[0].value + 12.0).abs() < 0.01, "{}", points[0].value);
+    }
+}
+
+#[cfg(test)]
+mod slot_geometry_tests {
+    use super::*;
+
+    #[test]
+    fn five_slots_remain_separate_and_inside_every_track_height() {
+        for height in [16.0, 24.0, 46.0, 66.0, 88.0, 132.0, 440.0] {
+            for width in [75.0, 92.0] {
+                let bounds = Rect::from_min_size(pos2(100.0, 150.0), vec2(width, height));
+                let cells = plugin_cells(bounds);
+                assert_eq!(cells.len(), 5);
+                for (index, cell) in cells.iter().enumerate() {
+                    assert!(bounds.contains_rect(*cell), "{height}: {cell:?}");
+                    for other in cells.iter().skip(index + 1) {
+                        assert!(!cell.intersects(*other));
+                    }
+                }
+                if height == 88.0 {
+                    assert!(cells.iter().all(|cell| cell.width() >= 67.0 && cell.height() >= 13.0));
+                }
+            }
+        }
     }
 }

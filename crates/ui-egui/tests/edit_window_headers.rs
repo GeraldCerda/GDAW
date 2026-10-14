@@ -81,7 +81,8 @@ fn header_keys_freeze_silence_and_show_automation() {
     assert_eq!(kick(&h).view, "volume");
 
     click(&mut h, at(HEADER_W + 81.5, 29.5));
-    assert_eq!(h.state().ui.window, MainWindow::Mix);
+    assert_eq!(h.state().ui.window, MainWindow::Edit);
+    assert!(h.state().ui.mix_separate);
 }
 
 #[test]
@@ -104,7 +105,7 @@ fn edit_window_insert_slots_open_change_and_add_plugins() {
 
     let plugin = soundcraft_dsp::plugins().iter().find(|p| !p.is_instrument).unwrap();
     click(&mut h, slot(2));
-    let category = h.get_by_label(&format!("{:?} ⏵", plugin.category)).rect().center();
+    let category = h.get_by_label("GDAW ⏵").rect().center();
     h.state_mut().synthetic.push(Event::PointerMoved(category));
     for _ in 0..10 {
         step(&mut h);
@@ -115,9 +116,13 @@ fn edit_window_insert_slots_open_change_and_add_plugins() {
 }
 
 #[test]
-fn short_tracks_show_insert_slots_as_squares() {
+fn short_tracks_keep_every_insert_distinct_and_interactive() {
     let (mut h, kick, row) = harness("Kick", "small", "view.edit_inserts_ae");
-    let square = |i: usize| pos2(row[0] + HEADER_W + 9.0 + i as f32 * 14.0, row[1] + 8.5);
+    let cells: Vec<_> = (b'A'..=b'E').map(|letter| {
+        h.query_all_by_label(&format!("Insert {}", letter as char)).map(|node| node.rect())
+            .find(|rect| rect.center().y >= row[1] && rect.center().y < row[3]).unwrap().center()
+    }).collect();
+    let square = |index: usize| cells[index];
 
     click(&mut h, square(1));
     assert!(h.state().ui.plugin_windows.contains(&(kick, 1)));
@@ -126,8 +131,7 @@ fn short_tracks_show_insert_slots_as_squares() {
     assert!(bypassed(&h, 0));
 
     click(&mut h, square(4));
-    let plugin = soundcraft_dsp::plugins().iter().find(|p| !p.is_instrument).unwrap();
-    assert!(h.query_by_label(&format!("{:?} ⏵", plugin.category)).is_some());
+    assert!(h.query_by_label("GDAW ⏵").is_some());
 }
 
 #[test]

@@ -126,6 +126,8 @@ pub struct UiState {
     pub drum_library: String,
     #[serde(default)]
     pub appearance_revision: u8,
+    #[serde(default)]
+    pub insert_views_revision: u8,
     pub configurations: Vec<(String, Value)>,
     pub theme: theme::ThemeMode,
     /// The main window's size (logical points) and maximized state, and the interface scale, as
@@ -156,8 +158,8 @@ impl Default for UiState {
             show_midi_editor: false,
             show_universe: false,
             narrow_mix: false,
-            mix_views: vec!["inserts_ae".into(), "sends_ae".into(), "io".into(), "color".into()],
-            edit_views: vec!["color".into(), "io".into(), "instruments".into()],
+            mix_views: vec!["instruments".into(), "inserts_ae".into(), "sends_ae".into(), "io".into(), "color".into()],
+            edit_views: vec!["color".into(), "instruments".into(), "inserts_ae".into(), "sends_ae".into(), "io".into()],
             track_tint: 0.5,
             plugin_windows: Vec::new(),
             send_window: None,
@@ -192,6 +194,7 @@ impl Default for UiState {
             workspace_dir: String::new(),
             drum_library: String::new(),
             appearance_revision: 1,
+            insert_views_revision: 1,
             configurations: Vec::new(),
             theme: theme::ThemeMode::Light,
             window_size: [1600.0, 1000.0],
@@ -1230,6 +1233,19 @@ impl SoundApp {
         if self.ui.appearance_revision == 0 {
             self.ui.theme = theme::ThemeMode::Light;
             self.ui.appearance_revision = 1;
+        }
+        if self.ui.insert_views_revision == 0 {
+            self.engine.session_mut().edit.set_flag("edit_view.inserts_ae", true);
+            self.engine.session_mut().edit.set_flag("edit_view.sends_ae", true);
+            for section in ["inserts_ae", "sends_ae"] {
+                if !self.ui.edit_views.iter().any(|view| view == section) {
+                    self.ui.edit_views.push(section.into());
+                }
+            }
+            if !self.ui.mix_views.iter().any(|view| view == "instruments") {
+                self.ui.mix_views.insert(0, "instruments".into());
+            }
+            self.ui.insert_views_revision = 1;
         }
         crate::devices::prepare_drum_library(self);
         let light = theme::wants_light(ctx, self.ui.theme);

@@ -1,6 +1,6 @@
 # Where SoundCraft falls short of Pro Tools
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-12 · **Change:** minor (G-01: audio device settings and opt-in ASIO) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-14 · **Change:** minor (G-01: audio device settings and opt-in ASIO) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Every known shortfall, one entry each, ranked by how much it stops a Pro Tools user from doing
 real work in SoundCraft. This is the work list: pick from the top. Rows marked **alpha blocker**
@@ -10,6 +10,8 @@ fail the core-workflow gate in [`roadmap.md`](roadmap.md#alpha-gate) and keep So
 Estimates marked "≈" are judgements; issue numbers are `storytold/soundcraft` GitHub issues.
 
 When you close a gap, delete its entry (or shrink it) in the same PR, and bump the timestamp.
+
+GDAW fork review: historical upstream entries below are not a runtime certification. The [2026-10-14 Edit/Mix audit](GDAW_EDIT_MIX_AUDIT_2026-10-14.md) records this fork's slot, menu, I/O and mixer corrections and remaining keyboard, Drum Rack and hardware-verification gaps.
 
 ## Ranked gaps
 

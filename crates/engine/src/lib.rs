@@ -156,7 +156,10 @@ pub fn starter_session(name: impl Into<String>, sample_rate: soundcraft_time::Sa
     session.edit.selected_tracks = vec![midi];
     session.edit.grid = soundcraft_time::GridValue::Note { value: soundcraft_time::NoteValue::Eighth, dotted: false, triplet: false };
     session.edit.grid_lines = true;
+    session.edit.edit_mode = soundcraft_model::EditMode::Grid;
     session.edit.main_counter = soundcraft_time::TimeFormat::BarsBeats;
+    session.edit.set_flag("edit_view.inserts_ae", true);
+    session.edit.set_flag("edit_view.sends_ae", true);
     session.edit.set_flag("edit_view.io", true);
     session.edit.set_flag("edit_view.instruments", true);
     session

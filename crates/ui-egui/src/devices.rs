@@ -83,6 +83,13 @@ fn poll_plugins(app: &mut SoundApp) {
     }
 }
 
+pub(crate) fn prepare_plugins(app: &mut SoundApp) {
+    poll_plugins(app);
+    if !app.browser.plugins_loaded && app.browser.plugin_scan.is_none() && app.player.is_some() {
+        scan_plugins(app, false);
+    }
+}
+
 pub fn selected_track(app: &SoundApp) -> Option<TrackId> {
     let session = app.engine.session();
     session.edit.selected_tracks.iter().copied().find(|id| session.track(*id).is_some())
@@ -137,6 +144,36 @@ pub fn insert_item(app: &mut SoundApp, track: TrackId, item: &BrowserItem) {
         Ok(_) => "Device or sample loaded on the selected track".into(),
         Err(error) => error,
     };
+}
+
+pub fn insert_effect_at(app: &mut SoundApp, track: TrackId, slot: usize, item: &BrowserItem) -> Result<(), String> {
+    if slot >= soundcraft_model::INSERT_SLOTS {
+        return Err("Choose an insert slot from A to J".into());
+    }
+    let (plugin, params) = match item {
+        BrowserItem::Plugin(plugin) => (plugin, None),
+        BrowserItem::Preset(plugin, path) => {
+            let preset = std::fs::metadata(path).ok().filter(|metadata| metadata.len() <= 1_048_576)
+                .and_then(|_| std::fs::read(path).ok()).and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .filter(|preset| preset["format"] == "soundcraft-plugin-preset" && preset["plugin"] == plugin.as_str())
+                .ok_or("The preset is unreadable or does not match its device")?;
+            (plugin, preset.get("params").cloned())
+        }
+        BrowserItem::Sample(_) => return Err("Drop audio on a track or Drum Rack pad; insert slots accept effects".into()),
+    };
+    let info = crate::mix_window::plugin_info(plugin).ok_or("This effect is unavailable")?;
+    if info.is_instrument {
+        return Err("Choose an instrument on an instrument track; insert slots accept effects".into());
+    }
+    let mut command = json!({"track": track.0, "slot": slot, "plugin": plugin});
+    if let Some(params) = params {
+        command["params"] = params;
+    }
+    app.run("mix.insert", command)?;
+    let _ = app.run("edit.select", json!({"tracks": [track.0]}));
+    app.ui.show_devices = true;
+    app.ui.status = format!("{} loaded in insert {}", info.name, (b'A' + slot as u8) as char);
+    Ok(())
 }
 
 fn row(app: &mut SoundApp, ui: &mut Ui, label: &str, item: BrowserItem) {
@@ -226,10 +263,7 @@ pub fn browser(app: &mut SoundApp, ui: &mut Ui) {
         });
         return;
     }
-    poll_plugins(app);
-    if !app.browser.plugins_loaded && app.browser.plugin_scan.is_none() && app.player.is_some() {
-        scan_plugins(app, false);
-    }
+    prepare_plugins(app);
     ui.horizontal_wrapped(|ui| {
         ui.label("Group by");
         ui.selectable_value(&mut app.browser.grouping, PluginGrouping::Developer, "Developer");
@@ -277,7 +311,7 @@ fn device(app: &mut SoundApp, ui: &mut Ui, track: TrackId, slot: usize, insert: 
     ui.set_min_width(rack_width);
     ui.set_max_width(rack_width + 20.0);
     ui.horizontal(|ui| {
-        ui.strong(name);
+        ui.strong(if instrument { format!("Instrument · {name}") } else { format!("{} · {name}", (b'A' + slot as u8) as char) });
         if !instrument {
             if ui.small_button(if insert.bypass { "Enable" } else { "Bypass" }).clicked() {
                 let _ = app.run("mix.insert_bypass", json!({"track": track.0, "slot": slot}));
@@ -479,18 +513,18 @@ pub fn chain(app: &mut SoundApp, ui: &mut Ui) {
     let response = egui::ScrollArea::horizontal().id_salt("track_device_chain").show(ui, |ui| {
         ui.horizontal_top(|ui| {
             if let Some(instrument) = &track.instrument {
-                egui::Frame::NONE.fill(Tokens::current().panel_bg).inner_margin(6.0).show(ui, |ui| {
+                egui::Frame::NONE.fill(Tokens::current().panel_bg).stroke(egui::Stroke::new(1.0, Tokens::current().border)).inner_margin(6.0).show(ui, |ui| {
                     ui.push_id(("device", track.id.0, soundcraft_mix::INSTRUMENT_SLOT), |ui| device(app, ui, track.id, soundcraft_mix::INSTRUMENT_SLOT, instrument));
                 });
             }
             for (slot, insert) in track.mixer.inserts.iter().enumerate().filter_map(|(slot, insert)| insert.as_ref().map(|insert| (slot, insert))) {
-                egui::Frame::NONE.fill(Tokens::current().panel_bg).inner_margin(6.0).show(ui, |ui| {
+                egui::Frame::NONE.fill(Tokens::current().panel_bg).stroke(egui::Stroke::new(1.0, Tokens::current().border)).inner_margin(6.0).show(ui, |ui| {
                     ui.push_id(("device", track.id.0, slot), |ui| device(app, ui, track.id, slot, insert));
                 });
             }
             ui.vertical(|ui| {
                 ui.set_min_width(180.0);
-                ui.label("Drop an instrument");
+                ui.label(if track.kind == TrackKind::Instrument { "Drop an instrument or effect" } else { "Drop an effect" });
                 if track.instrument.as_ref().is_some_and(|insert| insert.plugin == "drum_rack") {
                     if ui.button(if app.ui.drum_library.is_empty() { "Assign drum sample library…" } else { "Drum sample library…" }).clicked() {
                         assign_drum_library(app);
@@ -506,7 +540,7 @@ pub fn chain(app: &mut SoundApp, ui: &mut Ui) {
                     }
                 }
                 if let Some(slot) = track.mixer.inserts.iter().position(Option::is_none) {
-                    ui.menu_button("Add effect", |ui| crate::mix_window::plugin_menu(app, ui, track.id, slot, false));
+                    ui.menu_button("Add effect to next empty insert", |ui| crate::mix_window::plugin_menu(app, ui, track.id, slot, false));
                 } else {
                     ui.label("All effect slots are in use");
                 }

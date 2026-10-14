@@ -19,9 +19,6 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
     crate::docking::show(app, ui, crate::MainWindow::Mix);
 }
 
-/// The Mix window in its own native window (Window › Mix in Separate Window), so Edit and Mix can
-/// be seen at once, e.g. one per monitor. Closing that window brings Mix back into the main one.
-/// Backends without multiple windows show it as a floating egui window instead.
 pub fn show_separate(app: &mut SoundApp, ctx: &egui::Context) {
     let title = format!("{}  —  Mix", app.engine.session().name);
     let builder = egui::ViewportBuilder::default().with_title(title).with_inner_size([1100.0, 720.0]).with_min_inner_size([480.0, 320.0]);
@@ -51,11 +48,12 @@ pub(crate) fn content(app: &mut SoundApp, ui: &mut Ui) {
     let ids: Vec<TrackId> = app.engine.session().tracks.iter().filter(|x| !x.hidden && x.kind != TrackKind::Video).map(|x| x.id).collect();
     // Per-channel peaks for multichannel meters (read once per frame).
     let snap = app.player.as_ref().filter(|_| app.meters_live()).map(|p| p.meters());
-    egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
+    let height = ui.available_height().max(minimum_strip_height(&app.ui.mix_views));
+    egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 1.0;
             for id in ids {
-                strip(app, ui, id, snap.as_ref());
+                strip(app, ui, id, snap.as_ref(), height);
             }
             let rest = Rect::from_min_max(pos2(ui.cursor().min.x, ui.clip_rect().min.y), ui.clip_rect().max);
             if rest.width() > 4.0 && ui.interact(rest, ui.id().with("past_strips"), Sense::click()).double_clicked() {
@@ -63,6 +61,16 @@ pub(crate) fn content(app: &mut SoundApp, ui: &mut Ui) {
             }
         });
     });
+}
+
+fn minimum_strip_height(views: &[String]) -> f32 {
+    let all = views.iter().any(|view| view == "all");
+    let sections = [
+        ("mic_preamps", 38.0), ("instruments", 38.0), ("object", 24.0),
+        ("inserts_ae", 105.0), ("inserts_fj", 105.0), ("sends_ae", 105.0), ("sends_fj", 105.0),
+        ("eq_curve", 44.0), ("comments", 48.0), ("io", 86.0),
+    ];
+    374.0 + sections.into_iter().filter(|(key, _)| all || views.iter().any(|view| view.as_str() == *key)).map(|(_, height)| height).sum::<f32>()
 }
 
 /// Format of the destination a track's output feeds (the main mix, a bus, or stereo).
@@ -148,13 +156,13 @@ pub(crate) fn route_popup(app: &mut SoundApp, resp: &egui::Response, id: TrackId
     egui::Popup::menu(resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| route_menu(app, ui, id, input));
 }
 
-fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapshot>) {
+fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapshot>, height: f32) {
     let t = Tokens::current();
     let session = app.engine.session_arc();
     let Some(track) = session.track(id) else { return };
     let narrow = app.ui.narrow_mix;
     let w = strip_width(narrow);
-    let h = ui.available_height().max(560.0);
+    let h = height;
     let (r, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
     let selected = app.engine.session().edit.selected_tracks.contains(&id);
     let bg = if selected { t.strip_selected } else { t.strip_bg };
@@ -526,7 +534,7 @@ const COMPACT_SLOT: f32 = 30.0;
 const NAME_SIZE: f32 = 9.5;
 
 fn draw_mark(p: &egui::Painter, r: Rect, mark: Mark, color: Color32) {
-    let at = r.min + vec2(4.75, 4.75);
+    let at = pos2(r.min.x + 4.75, r.center().y);
     match mark {
         Mark::Dot => {
             p.circle_filled(at, 2.0, color);
@@ -545,6 +553,7 @@ fn draw_mark(p: &egui::Painter, r: Rect, mark: Mark, color: Color32) {
 fn empty_slot(p: &egui::Painter, r: Rect, hovered: bool, mark: Mark) {
     let t = Tokens::current();
     p.rect_filled(r, 2.0, if hovered { shade(t.slot_empty, 0.06) } else { t.slot_empty });
+    p.rect_stroke(r, 2.0, Stroke::new(0.5, t.border), StrokeKind::Inside);
     let color = if matches!(mark, Mark::Letter(_)) { t.slot_mark.lerp_to_gamma(t.text, 0.55) } else { t.slot_mark };
     draw_mark(p, r, mark, color);
 }
@@ -591,12 +600,16 @@ pub(crate) fn insert_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: 
     let info = ins.as_ref().and_then(|i| plugin_info(&i.plugin));
     let name = ins.as_ref().map(|i| info.map_or(i.plugin.as_str(), |p| p.short_name)).unwrap_or_default();
     match &ins {
-        None => empty_slot(ui.painter(), r, resp.hovered(), Mark::Dot),
+        None => empty_slot(ui.painter(), r, resp.hovered(), Mark::Letter((b'A' + slot as u8) as char)),
         Some(i) => {
             let faces = if i.bypass { t.slot_bypassed } else { t.slot_face };
             let color = if info.is_some() { t.text } else { t.text_dim };
-            used_slot(ui.painter(), r, faces, Mark::Dot, name, color, None);
+            used_slot(ui.painter(), r, faces, Mark::Letter((b'A' + slot as u8) as char), name, color, None);
         }
+    }
+    if resp.clicked() {
+        let _ = app.run("edit.select", json!({"tracks": [id.0]}));
+        app.ui.show_devices = true;
     }
     if resp.clicked() && ins.is_some() {
         if ui.input(|i| i.modifiers.command) {
@@ -606,19 +619,26 @@ pub(crate) fn insert_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: 
         }
     }
     let cmd = if ui.ctx().os().is_mac() { "⌘" } else { "Ctrl+" };
-    let tip = format!("{name}: click to open · {cmd}click to bypass · right-click to change");
-    let menu_resp = if ins.is_none() { resp.clone() } else { resp.clone().on_hover_text(tip) };
+    let full_name = ins.as_ref().map(|insert| info.map_or(insert.plugin.as_str(), |plugin| plugin.name)).unwrap_or("Empty");
+    let tip = format!("{} · Insert {} · {full_name}\nClick to open · {cmd}click to bypass · right-click to change · drop an effect here", track.name, (b'A' + slot as u8) as char);
+    let menu_resp = resp.clone().on_hover_text(tip);
     let popup = if ins.is_none() { egui::Popup::menu(&menu_resp) } else { egui::Popup::context_menu(&menu_resp) };
     let popup = popup.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
     popup.show(|ui| plugin_menu(app, ui, id, slot, ins.is_some()));
+    if let Some(item) = resp.dnd_release_payload::<crate::devices::BrowserItem>() {
+        if let Err(error) = crate::devices::insert_effect_at(app, id, slot, &item) {
+            app.ui.status = error;
+        }
+    }
 }
 
 /// An insert's menu: a search field that takes typing at once, then (until something is typed)
 /// Bypass and removal and the plugins by category and format.
 pub fn plugin_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, occupied: bool) {
+    crate::devices::prepare_plugins(app);
     let search = MenuSearch::show(ui, egui::Id::new(("plugin-search", id.0, slot)), "Search plugins…");
     if search.typing() {
-        if let Some(plugin) = plugin_search(ui, &search, false) {
+        if let Some(plugin) = plugin_search(app, ui, &search, false) {
             run_pick(app, ui, "mix.insert", json!({"track": id.0, "slot": slot, "plugin": plugin}));
         }
         return;
@@ -632,22 +652,7 @@ pub fn plugin_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, oc
         }
         ui.separator();
     }
-    let mut cats: Vec<soundcraft_dsp::Category> = Vec::new();
-    for p in soundcraft_dsp::plugins() {
-        if !p.is_instrument && !cats.contains(&p.category) {
-            cats.push(p.category);
-        }
-    }
-    for c in cats {
-        ui.menu_button(format!("{c:?}"), |ui| {
-            for p in soundcraft_dsp::plugins().iter().filter(|p| p.category == c && !p.is_instrument) {
-                if ui.button(p.name).clicked() {
-                    run_pick(app, ui, "mix.insert", json!({"track": id.0, "slot": slot, "plugin": p.id}));
-                }
-            }
-        });
-    }
-    if let Some(plugin) = hosted_menus(ui, false) {
+    if let Some(plugin) = catalog_menu(app, ui, false) {
         run_pick(app, ui, "mix.insert", json!({"track": id.0, "slot": slot, "plugin": plugin}));
     }
 }
@@ -656,10 +661,11 @@ pub fn plugin_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, oc
 /// (until something is typed) its instrument's editor and the built-in, CLAP, VST3 and Audio Units
 /// instruments.
 pub fn instrument_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
+    crate::devices::prepare_plugins(app);
     let slot = soundcraft_mix::INSTRUMENT_SLOT;
     let search = MenuSearch::show(ui, egui::Id::new(("instrument-search", id.0)), "Search instruments…");
     if search.typing() {
-        if let Some(plugin) = plugin_search(ui, &search, true) {
+        if let Some(plugin) = plugin_search(app, ui, &search, true) {
             run_pick(app, ui, "mix.instrument", json!({"track": id.0, "plugin": plugin}));
         }
         return;
@@ -690,18 +696,7 @@ pub fn instrument_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
         }
         ui.separator();
     }
-    let mut picked = None;
-    ui.menu_button("Built-in", |ui| {
-        for p in soundcraft_dsp::plugins().iter().filter(|p| p.is_instrument) {
-            if ui.button(p.name).clicked() {
-                picked = Some(p.id.to_string());
-            }
-        }
-    });
-    if let Some(p) = hosted_menus(ui, true) {
-        picked = Some(p);
-    }
-    if let Some(plugin) = picked {
+    if let Some(plugin) = catalog_menu(app, ui, true) {
         run_pick(app, ui, "mix.instrument", json!({"track": id.0, "plugin": plugin}));
     }
 }
@@ -714,50 +709,61 @@ fn run_pick(app: &mut SoundApp, ui: &Ui, cmd: &str, params: serde_json::Value) {
     ui.close();
 }
 
-/// The plugins whose name or vendor holds the search text: the built-in ones, then Audio Units
-/// (listing them creates no instances) and whichever of CLAP and VST3 have been scanned, with a
-/// button to scan each of the others. Returns the id picked.
-fn plugin_search(ui: &mut Ui, search: &MenuSearch, instruments: bool) -> Option<String> {
-    let mut built_in: Vec<&soundcraft_dsp::PluginInfo> =
-        soundcraft_dsp::plugins().iter().copied().filter(|p| p.is_instrument == instruments && search.matches(p.name)).collect();
-    built_in.sort_by_cached_key(|p| p.name.to_lowercase());
-    let (clap, vst3) = (soundcraft_clap_host::cached(), soundcraft_vst3_host::cached());
-    let mut hosted: Vec<(MenuPlugin, &str)> = Vec::new();
-    for d in clap.iter().flatten().filter(|d| d.is_instrument == instruments) {
-        hosted.push((MenuPlugin { id: d.id.clone(), name: d.name.clone(), vendor: d.vendor.clone() }, "CLAP"));
+fn catalog_label(plugin: &crate::plugin_browser::BrowserPlugin) -> String {
+    if plugin.format == crate::plugin_browser::PluginFormat::BuiltIn {
+        plugin.name.clone()
+    } else {
+        format!("{} · {}", plugin.name, plugin.format.label())
     }
-    for d in vst3.iter().flatten().filter(|d| d.is_instrument == instruments) {
-        hosted.push((MenuPlugin { id: d.id.clone(), name: d.name.clone(), vendor: d.vendor.clone() }, "VST3"));
+}
+
+fn plugin_search(app: &SoundApp, ui: &mut Ui, search: &MenuSearch, instruments: bool) -> Option<String> {
+    let mut plugins: Vec<_> = crate::plugin_browser::groups(
+        &app.browser.plugins, app.browser.grouping, app.browser.format, Some(instruments), &search.query,
+    ).into_iter().flat_map(|(_, plugins)| plugins).collect();
+    plugins.sort_by_cached_key(|plugin| (plugin.name.to_lowercase(), plugin.format.label(), plugin.id.clone()));
+    let picked = search.rows(ui, plugins.len(), 320.0, |ui, index, highlighted| plugins.get(index).is_some_and(|plugin| menu_row(ui, highlighted, &catalog_label(plugin))));
+    if plugins.is_empty() {
+        ui.label("No matches");
     }
-    for d in soundcraft_au_host::scan().into_iter().filter(|d| d.is_instrument == instruments) {
-        hosted.push((MenuPlugin { id: d.id, name: d.name, vendor: d.vendor }, "AU"));
-    }
-    hosted.retain(|(p, _)| search.matches(&p.name) || search.matches(&p.vendor));
-    hosted.sort_by_cached_key(|(p, format)| (p.name.to_lowercase(), *format));
-    let n = built_in.len() + hosted.len();
-    let picked = search.rows(ui, n, 320.0, |ui, i, highlighted| match built_in.get(i) {
-        Some(p) => menu_row(ui, highlighted, p.name),
-        None => {
-            let (p, format) = &hosted[i - built_in.len()];
-            let label = if p.vendor.is_empty() { format!("{} ({format})", p.name) } else { format!("{} — {} ({format})", p.name, p.vendor) };
-            menu_row(ui, highlighted, &label)
+    picked.and_then(|index| plugins.get(index).map(|plugin| plugin.id.clone()))
+}
+
+fn catalog_menu(app: &mut SoundApp, ui: &mut Ui, instruments: bool) -> Option<String> {
+    use crate::plugin_browser::{PluginFormat, PluginGrouping};
+    ui.horizontal(|ui| {
+        ui.label("Group by");
+        ui.selectable_value(&mut app.browser.grouping, PluginGrouping::Developer, "Developer");
+        ui.selectable_value(&mut app.browser.grouping, PluginGrouping::Effect, "Effect");
+    });
+    egui::ComboBox::from_id_salt(("insert_format", instruments)).selected_text(app.browser.format.label()).show_ui(ui, |ui| {
+        for format in [PluginFormat::All, PluginFormat::Vst3, PluginFormat::Au, PluginFormat::Clap, PluginFormat::BuiltIn] {
+            ui.selectable_value(&mut app.browser.format, format, format.label());
         }
     });
-    if n == 0 {
-        ui.weak("No matches");
+    if app.browser.plugin_scan.is_some() {
+        ui.weak("Scanning installed plugins…");
+        ui.ctx().request_repaint_after_secs(0.05);
     }
-    if clap.is_none() || vst3.is_none() {
-        ui.separator();
-        ui.horizontal(|ui| {
-            if clap.is_none() && ui.small_button("Scan CLAP").clicked() {
-                soundcraft_clap_host::scan();
-            }
-            if vst3.is_none() && ui.small_button("Scan VST3").clicked() {
-                soundcraft_vst3_host::scan();
-            }
-        });
+    let groups = crate::plugin_browser::groups(&app.browser.plugins, app.browser.grouping, app.browser.format, Some(instruments), "");
+    if groups.is_empty() {
+        ui.label("No matching plugins");
     }
-    picked.map(|i| built_in.get(i).map_or_else(|| hosted[i - built_in.len()].0.id.clone(), |p| p.id.to_string()))
+    let mut picked = None;
+    egui::ScrollArea::vertical().id_salt(("insert_groups", instruments)).max_height(320.0).show(ui, |ui| {
+        for (name, plugins) in groups {
+            ui.menu_button(name, |ui| {
+                egui::ScrollArea::vertical().id_salt(("insert_plugins", instruments)).max_height(320.0).show(ui, |ui| {
+                    for plugin in plugins {
+                        if ui.button(catalog_label(&plugin)).clicked() {
+                            picked = Some(plugin.id);
+                        }
+                    }
+                });
+            });
+        }
+    });
+    picked
 }
 
 /// A picker menu's search field. It has the keyboard as soon as the menu opens and starts empty
@@ -831,69 +837,6 @@ impl MenuSearch {
 fn menu_row(ui: &mut Ui, selected: bool, text: &str) -> bool {
     let text = if selected { egui::RichText::new(text).color(Color32::WHITE) } else { egui::RichText::new(text) };
     ui.add(egui::Button::selectable(selected, text).min_size(vec2(0.0, ui.spacing().interact_size.y))).clicked()
-}
-
-/// A hosted plugin as the plugin menus list it.
-struct MenuPlugin {
-    id: String,
-    name: String,
-    vendor: String,
-}
-
-/// The CLAP, VST3 and (on macOS) Audio Units submenus, of effects or of instruments; returns the
-/// id picked. Each format is scanned the first time its submenu opens, then cached by its host.
-fn hosted_menus(ui: &mut Ui, instruments: bool) -> Option<String> {
-    let mut picked = None;
-    ui.menu_button("CLAP", |ui| {
-        let list = soundcraft_clap_host::scan().into_iter().filter(|d| d.is_instrument == instruments);
-        if let Some(p) = vendor_menus(ui, list.map(|d| MenuPlugin { id: d.id, name: d.name, vendor: d.vendor }).collect(), "No CLAP plugins found") {
-            picked = Some(p);
-        }
-    });
-    ui.menu_button("VST3", |ui| {
-        let list = soundcraft_vst3_host::scan().into_iter().filter(|d| d.is_instrument == instruments);
-        if let Some(p) = vendor_menus(ui, list.map(|d| MenuPlugin { id: d.id, name: d.name, vendor: d.vendor }).collect(), "No VST3 plugins found") {
-            picked = Some(p);
-        }
-    });
-    if cfg!(target_os = "macos") {
-        ui.menu_button("Audio Units", |ui| {
-            let list = soundcraft_au_host::scan().into_iter().filter(|d| d.is_instrument == instruments);
-            if let Some(p) = vendor_menus(ui, list.map(|d| MenuPlugin { id: d.id, name: d.name, vendor: d.vendor }).collect(), "No Audio Units found")
-            {
-                picked = Some(p);
-            }
-        });
-    }
-    picked
-}
-
-/// One submenu per vendor (as Pro Tools lists plug-ins by manufacturer), each list scrolling
-/// within the screen so that every plugin stays reachable however many are installed.
-fn vendor_menus(ui: &mut Ui, mut list: Vec<MenuPlugin>, none: &str) -> Option<String> {
-    if list.is_empty() {
-        ui.label(none);
-        return None;
-    }
-    list.sort_by_cached_key(|p| (p.vendor.to_lowercase(), p.name.to_lowercase()));
-    let mut vendors: Vec<&str> = list.iter().map(|p| p.vendor.as_str()).collect();
-    vendors.dedup();
-    let max_h = (ui.ctx().content_rect().height() - 80.0).max(160.0);
-    let mut picked = None;
-    egui::ScrollArea::vertical().id_salt("vendors").max_height(max_h).show(ui, |ui| {
-        for v in vendors {
-            ui.menu_button(if v.is_empty() { "Unknown vendor" } else { v }, |ui| {
-                egui::ScrollArea::vertical().id_salt("plugins").max_height(max_h).show(ui, |ui| {
-                    for p in list.iter().filter(|p| p.vendor == v) {
-                        if ui.button(&p.name).clicked() {
-                            picked = Some(p.id.clone());
-                        }
-                    }
-                });
-            });
-        }
-    });
-    picked
 }
 
 /// A built-in plugin's description, else a hosted CLAP (`clap:<id>`), VST3 (`vst3:<class id>`) or
@@ -1358,5 +1301,21 @@ mod tests {
         }
         frame(vec![], true);
         assert_eq!(frame(vec![], true), (true, None), "hidden, the field lost focus, so the readout is back");
+    }
+}
+
+#[cfg(test)]
+mod strip_height_tests {
+    use super::*;
+
+    #[test]
+    fn every_enabled_section_reserves_space_above_the_fader() {
+        let minimal = minimum_strip_height(&[]);
+        let defaults = minimum_strip_height(&["instruments".into(), "inserts_ae".into(), "sends_ae".into(), "io".into()]);
+        let all = minimum_strip_height(&["all".into()]);
+        assert_eq!(minimal, 374.0);
+        assert_eq!(defaults, 708.0);
+        assert_eq!(all, 1172.0);
+        assert!(all > defaults);
     }
 }

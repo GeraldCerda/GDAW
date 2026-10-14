@@ -17,6 +17,8 @@ fn startup_has_a_stereo_drum_rack_and_a_mono_recording_track() {
     assert_eq!(audio.mixer.input, Route::Hardware("In 1".into()));
     assert_eq!(audio.mixer.output, Route::Main);
     assert!(session.edit.flag("edit_view.io"));
+    assert!(session.edit.flag("edit_view.inserts_ae"));
+    assert!(session.edit.flag("edit_view.sends_ae"));
     assert_eq!(session.edit.selected_tracks, vec![midi.id]);
 }
 
@@ -36,6 +38,7 @@ fn startup_grid_exposes_eighth_notes_without_changing_zoom() {
     let session = starter_session("Grid", SampleRate::HZ_48000);
     assert_eq!(session.edit.grid.label(), "1/8");
     assert!(session.edit.grid_lines);
+    assert_eq!(session.edit.edit_mode, soundcraft_model::EditMode::Grid);
     let pixels = session.edit.grid.step_samples(0, session.sample_rate, &session.tempo, session.frame_rate) as f64 / session.edit.zoom.samples_per_px;
     assert!(pixels >= 2.0);
 }

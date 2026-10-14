@@ -1,13 +1,13 @@
 # UI parity
 
-> **Last reviewed:** 2026-10-13 · **Last updated:** 2026-10-13 · **Change:** minor (drag across checkboxes, #399; waveforms preview fades during drag) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-14 · **Change:** GDAW Edit/Mix controls and plugin-slot audit · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 How SoundCraft feels in the hands of a Pro Tools user: tools, modes, modifiers, shortcuts,
 windows, meters. Measured from `crates/model/src/session.rs` (tools, modes), the command
 registry (shortcuts), `crates/ui-egui/src` (windows, gestures) and user issues; compared with
 reference screenshots kept locally under `plan/protools/screenshots/` (16, never committed).
 
-**UI/UX fidelity: ~55 % ready** (estimated). Remaining ≈ 60–100 h.
+**GDAW verification:** source and screenshot review only; no new compiled-app result. See [the Edit/Mix audit](GDAW_EDIT_MIX_AUDIT_2026-10-14.md) for corrections, remaining gaps and unexecuted regressions. The former readiness percentage was not a runtime assessment.
 
 Legend: ✅ matches · 🟡 partial · ❌ missing.
 
@@ -42,7 +42,7 @@ Legend: ✅ matches · 🟡 partial · ❌ missing.
 
 | Window | Status | Notes |
 |---|---|---|
-| Edit window: rulers, track headers, view columns, Clip List, Groups, Tracks list | ✅ | Track Pin (new in 2026.4) ✅ (`track.pin`) |
+| Edit window: rulers, track headers, view columns, Clip List, Groups, Tracks list | 🟡 | Shared default insert/send columns and five-slot geometry corrected; Mac verification pending.  Track Pin (new in 2026.4) ✅ (`track.pin`) |
 | Mix window: strips, views (inserts, sends, I/O, comments, EQ curve, preamps, instruments, object) | ✅ | Narrow Mix ✅; Mix and Edit on screen at once (Window › Mix in Separate Window, its own native window) ✅; Delay Compensation view and HEAT missing |
 | MIDI Editor, Score Editor, Event List | 🟡 | Dock height bug fixed (#113); notation editing shallow |
 | Transport, Big Counter, Memory Locations, Automation, Video, Universe, Renderer, UI Customization | ✅ present | |
@@ -57,7 +57,7 @@ Legend: ✅ matches · 🟡 partial · ❌ missing.
 
 | Feature | Status | Notes |
 |---|---|---|
-| Dark theme close to Pro Tools' | ✅ | Light theme (#32) and live system appearance (#85) beyond Pro Tools |
+| Light, Dark and System themes | 🟡 | Light is the GDAW default. Exact layout and visual parity remain incomplete |
 | Interface scaling | 🟡 | Slider in PR #147 |
 | Meter types and ballistics (peak, RMS, VU, K-scales, gain reduction) | 🟡 | Peak/RMS; meter type choice and GR meters partial |
 | Clip indicators, track colours, waveform views (peak/power/rectified/outlines) | ✅ | |
@@ -68,6 +68,7 @@ Legend: ✅ matches · 🟡 partial · ❌ missing.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-14 | GDAW | Visible inserts/sends, bounded slots, targeted drops, shared catalog menus, editable I/O, scrollable mixer and regression fixture corrections. Syntax checked; Rust/UI/hardware tests pending |
 | 2026-10-13 | minor | Drag across checkboxes (#399) |
 | 2026-10-13 | minor | Waveforms and fade curves share temporary envelopes during drag, without rebuilding media or editing the document before release. Readiness estimate unchanged |
 | 2026-10-13 | minor | Fade curves use bounded physical-pixel sampling; midpoint handles stay visible and inside the clip, with repeat-drag coverage after extreme bends. Readiness estimate unchanged |
