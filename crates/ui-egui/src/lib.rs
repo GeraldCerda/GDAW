@@ -20,6 +20,7 @@ pub mod devices;
 pub mod ops_windows;
 pub mod palette;
 pub mod panels;
+pub mod plugin_browser;
 mod recent;
 pub mod recovery;
 pub mod sampler_window;
@@ -288,6 +289,9 @@ pub struct SoundApp {
     last_autosave: Option<std::time::Instant>,
     pub dialogs: dialogs::Dialogs,
     pub meters: HashMap<TrackId, MeterDisplay>,
+    pub input_meters: HashMap<TrackId, MeterDisplay>,
+    input_error: Option<String>,
+    input_meter_routes: HashMap<TrackId, (usize, usize)>,
     pub main_meter: MeterDisplay,
     /// Reused multichannel snapshot; populated at an adaptive rate by `logic`.
     meter_snapshot: soundcraft_playback::MeterSnapshot,
@@ -376,6 +380,9 @@ impl SoundApp {
             last_autosave: None,
             dialogs: dialogs::Dialogs::default(),
             meters: HashMap::new(),
+            input_meters: HashMap::new(),
+            input_error: None,
+            input_meter_routes: HashMap::new(),
             main_meter: MeterDisplay::default(),
             meter_snapshot: soundcraft_playback::MeterSnapshot::default(),
             gesture: None,
@@ -780,11 +787,10 @@ impl SoundApp {
         best.map(|(_, p)| p)
     }
 
-    /// Whether the meters are live: while playing, and while armed or input-monitored tracks are heard.
     fn meters_live(&self) -> bool {
         self.engine.transport.playing
             || self.browser.preview_started.is_some_and(|started| started.elapsed().as_secs_f32() < 2.0)
-            || (self.recorder.is_some() && self.engine.session().tracks.iter().any(|t| t.mixer.input_monitor || t.mixer.record_arm))
+            || (self.recorder.is_some() && self.engine.session().tracks.iter().any(physical_input_track))
     }
 
     /// Reopens the audio devices with `cfg` (Setup › Playback Engine › Apply), keeping the
@@ -803,16 +809,62 @@ impl SoundApp {
             // closed here, on the main thread, or they would stay on screen orphaned.
             p.close_editors();
         }
-        // The input reopens on the next record or monitor with the new choice.
         self.recorder = None;
         self.recorder_failed = false;
+        self.input_error = None;
+        self.input_meters.clear();
+        self.input_meter_routes.clear();
         let player = soundcraft_playback::Player::with_config(self.engine.session_arc(), &self.ui.audio);
         player.locate(at);
         self.player = Some(player);
+        if self.engine.session().tracks.iter().any(physical_input_track) {
+            self.ensure_input();
+        }
         Ok(())
     }
 
-    /// Open the input device once (for recording and input monitoring) and feed the player.
+    fn update_input_meters(&mut self, peaks: Option<&[f32]>, dt: f32) -> HashMap<TrackId, [f32; 2]> {
+        let session = self.engine.session();
+        self.input_meters.retain(|id, _| session.track(*id).is_some_and(physical_input_track));
+        self.input_meter_routes.retain(|id, _| session.track(*id).is_some_and(physical_input_track));
+        let mut track_meters = HashMap::new();
+        for track in session.tracks.iter().filter(|track| physical_input_track(track)) {
+            let route = (track.mixer.input.hardware_input_start().unwrap_or(0), track.channels());
+            if self.input_meter_routes.get(&track.id) != Some(&route) {
+                self.input_meters.remove(&track.id);
+                self.input_meter_routes.insert(track.id, route);
+            }
+            let peak = peaks.map_or([0.0; 2], |peaks| input_meter_peak(track, peaks));
+            feed_meter(self.input_meters.entry(track.id).or_default(), peak, 0.0, dt);
+            if peaks.is_some() && raw_input_on_track_meter(track, self.engine.transport.playing) {
+                track_meters.insert(track.id, peak);
+            }
+        }
+        track_meters
+    }
+
+    pub fn input_status(&self) -> String {
+        if let Some(recorder) = &self.recorder {
+            format!("{} · {} Hz · {} inputs", recorder.device_name, recorder.sample_rate, recorder.channels)
+        } else if let Some(error) = &self.input_error {
+            format!("Input unavailable: {error}")
+        } else if self.player.is_none() {
+            "Audio devices disabled".into()
+        } else {
+            "Waiting for a physical input assignment".into()
+        }
+    }
+
+    pub fn output_status(&self) -> String {
+        self.player.as_ref().map_or_else(|| "Audio devices disabled".into(), |player| {
+            if player.silent {
+                "Output unavailable: silent clock".into()
+            } else {
+                format!("{} · {} Hz · {} outputs", player.device_name, player.device_rate, player.device_channels)
+            }
+        })
+    }
+
     fn ensure_input(&mut self) {
         if self.recorder.is_some() || self.recorder_failed || self.player.is_none() {
             return;
@@ -822,10 +874,12 @@ impl SoundApp {
                 if let Some(p) = &self.player {
                     p.set_input(std::sync::Arc::clone(&r.monitor));
                 }
+                self.input_error = None;
                 self.recorder = Some(r);
             }
             Err(e) => {
                 self.recorder_failed = true;
+                self.input_error = Some(e.clone());
                 self.ui.status = format!("No audio input: {e}");
             }
         }
@@ -879,6 +933,9 @@ impl SoundApp {
             Trouble::Device(what) => {
                 self.recorder = None;
                 self.recorder_failed = true;
+                self.input_error = Some(what.clone());
+                self.input_meters.clear();
+                self.input_meter_routes.clear();
                 (what, "Reconnect it, then use Reconnect audio device in Setup ▸ Playback Engine.")
             }
             Trouble::Disk(what) => (what, "Check the disk, then record again."),
@@ -901,7 +958,13 @@ impl SoundApp {
         }
         self.recorder = None;
         self.recorder_failed = false;
+        self.input_error = None;
+        self.input_meters.clear();
+        self.input_meter_routes.clear();
         self.player = Some(Player::with_config(self.engine.session_arc(), &self.ui.audio));
+        if self.engine.session().tracks.iter().any(physical_input_track) {
+            self.ensure_input();
+        }
     }
 
     fn finish_recording(&mut self) {
@@ -1018,6 +1081,9 @@ impl SoundApp {
                     // The old capture belongs to the replaced document, never to the new one.
                     self.recorder = None;
                     self.recorder_failed = false;
+                    self.input_error = None;
+                    self.input_meters.clear();
+                    self.input_meter_routes.clear();
                     self.punch = None;
                     self.gesture = None;
                     self.touched.clear();
@@ -1079,13 +1145,8 @@ impl SoundApp {
                 }
             }
         }
-        let mut input_meters: std::collections::HashMap<_, _> = self.recorder.as_ref().map_or_else(std::collections::HashMap::new, |recorder| {
-            let peaks = recorder.take_input_peaks();
-            self.engine.session().tracks.iter()
-                .filter(|track| track.kind == TrackKind::Audio && !track.inactive && (track.mixer.record_arm || track.mixer.input_monitor))
-                .map(|track| (track.id, (input_meter_peak(track, &peaks), !track.mixer.input_monitor)))
-                .collect()
-        });
+        let input_peaks = self.recorder.as_ref().map(|recorder| recorder.take_input_peaks());
+        let mut input_meters = self.update_input_meters(input_peaks.as_deref(), dt);
         // Read back the position.
         if let Some(p) = &self.player {
             let playing = p.is_playing();
@@ -1105,8 +1166,7 @@ impl SoundApp {
             let snap = &self.meter_snapshot;
             for (id, m) in &snap.tracks {
                 let d = self.meters.entry(*id).or_default();
-                let input = input_meters.remove(id);
-                let peak = input.filter(|(_, raw)| *raw).map_or(m.peak, |(peak, _)| peak);
+                let peak = input_meters.remove(id).unwrap_or(m.peak);
                 feed_meter(d, peak, m.gain_reduction_db, dt);
                 if m.plugin_failures.count != d.plugin_failures {
                     d.plugin_failures = m.plugin_failures.count;
@@ -1134,7 +1194,7 @@ impl SoundApp {
                 self.stop_play();
             }
         }
-        for (id, (peak, _)) in input_meters {
+        for (id, peak) in input_meters {
             feed_meter(self.meters.entry(id).or_default(), peak, 0.0, dt);
         }
         if !self.meters_live() {
@@ -1196,7 +1256,7 @@ impl SoundApp {
         self.autosave();
         if self.recorder.is_none()
             && !self.recorder_failed
-            && self.engine.session().tracks.iter().any(|t| t.mixer.input_monitor || t.mixer.record_arm)
+            && self.engine.session().tracks.iter().any(physical_input_track)
         {
             self.ensure_input();
         }
@@ -1298,9 +1358,20 @@ impl SoundApp {
             "dialog": self.dialogs.open_name(),
             "frame_ms": self.frame_ms,
             "audio_device": self.player.as_ref().map(|p| p.device_name.clone()),
+            "input_device": self.recorder.as_ref().map(|recorder| recorder.device_name.clone()),
+            "input_status": self.input_status(),
+            "output_status": self.output_status(),
             "status": self.ui.status,
         })
     }
+}
+
+fn physical_input_track(track: &soundcraft_model::Track) -> bool {
+    track.kind == TrackKind::Audio && !track.inactive && track.mixer.input.hardware_input_start().is_some()
+}
+
+fn raw_input_on_track_meter(track: &soundcraft_model::Track, playing: bool) -> bool {
+    physical_input_track(track) && !track.mixer.input_monitor && (!playing || track.mixer.record_arm)
 }
 
 fn input_meter_peak(track: &soundcraft_model::Track, peaks: &[f32]) -> [f32; 2] {
@@ -1354,6 +1425,40 @@ mod tests {
     use super::{Services, SoundApp, automation_step_due, input_meter_peak};
     use serde_json::json;
     use soundcraft_model::{TrackId, TrackKind};
+
+    #[test]
+    fn unarmed_physical_inputs_meter_without_enabling_monitoring() {
+        let engine = soundcraft_engine::Engine::new(soundcraft_engine::starter_session("Input", soundcraft_model::time::SampleRate::HZ_48000));
+        let mut app = SoundApp::new(engine, None, Services::default());
+        let track = app.engine.session().track_by_name("Audio 1").unwrap().id;
+        let display = app.update_input_meters(Some(&[0.5]), 1.0 / 60.0);
+        assert_eq!(display.get(&track), Some(&[0.5, 0.5]));
+        assert_eq!(app.input_meters.get(&track).unwrap().level, [0.5, 0.5]);
+        assert!(!app.engine.session().track(track).unwrap().mixer.input_monitor);
+        assert!(!app.engine.session().track(track).unwrap().mixer.record_arm);
+        app.engine.transport.playing = true;
+        assert!(app.update_input_meters(Some(&[0.25]), 1.0 / 60.0).is_empty());
+        assert!(app.input_meters.get(&track).unwrap().level[0] > 0.25);
+        app.run("mix.record_arm", json!({"track": track.0, "value": true})).unwrap();
+        assert_eq!(app.update_input_meters(Some(&[0.3]), 1.0 / 60.0).get(&track), Some(&[0.3, 0.3]));
+        app.run("mix.input_monitor", json!({"track": track.0, "value": true})).unwrap();
+        assert!(app.update_input_meters(Some(&[0.3]), 1.0 / 60.0).is_empty());
+    }
+
+    #[test]
+    fn input_routing_changes_clear_stale_peaks_and_none_removes_the_meter() {
+        let engine = soundcraft_engine::Engine::new(soundcraft_engine::starter_session("Input", soundcraft_model::time::SampleRate::HZ_48000));
+        let mut app = SoundApp::new(engine, None, Services::default());
+        let track = app.engine.session().track_by_name("Audio 1").unwrap().id;
+        app.update_input_meters(Some(&[0.8, 0.0]), 1.0 / 60.0);
+        app.run("track.input", json!({"track": track.0, "input": "In 2"})).unwrap();
+        app.update_input_meters(Some(&[0.8, 0.0]), 1.0 / 60.0);
+        assert_eq!(app.input_meters.get(&track).unwrap().level, [0.0; 2]);
+        assert_eq!(app.input_meters.get(&track).unwrap().hold, [0.0; 2]);
+        app.run("track.input", json!({"track": track.0, "input": "none"})).unwrap();
+        app.update_input_meters(Some(&[0.8, 0.2]), 1.0 / 60.0);
+        assert!(!app.input_meters.contains_key(&track));
+    }
 
     #[test]
     fn new_session_stops_playback_and_the_old_clock() {

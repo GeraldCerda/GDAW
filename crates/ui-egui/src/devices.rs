@@ -1,3 +1,4 @@
+use crate::plugin_browser::{BrowserPlugin, PluginFormat, PluginGrouping};
 use crate::{SoundApp, theme::Tokens};
 use egui::{Sense, Ui, vec2};
 use serde_json::{Value, json};
@@ -14,6 +15,11 @@ pub enum BrowserItem {
 pub struct BrowserState {
     pub query: String,
     pub category: String,
+    pub grouping: PluginGrouping,
+    pub format: PluginFormat,
+    pub plugins: Vec<BrowserPlugin>,
+    pub plugins_loaded: bool,
+    pub plugin_scan: Option<std::sync::mpsc::Receiver<Vec<BrowserPlugin>>>,
     pub folder: PathBuf,
     pub files: Vec<(String, PathBuf, bool)>,
     pub pad: u8,
@@ -22,7 +28,52 @@ pub struct BrowserState {
 
 impl Default for BrowserState {
     fn default() -> Self {
-        Self { query: String::new(), category: "Instruments".into(), folder: PathBuf::new(), files: Vec::new(), pad: 36, preview_started: None }
+        Self {
+            query: String::new(),
+            category: "Instruments".into(),
+            grouping: PluginGrouping::Developer,
+            format: PluginFormat::All,
+            plugins: crate::plugin_browser::built_in_catalog(),
+            plugins_loaded: false,
+            plugin_scan: None,
+            folder: PathBuf::new(),
+            files: Vec::new(),
+            pad: 36,
+            preview_started: None,
+        }
+    }
+}
+
+fn scan_plugins(app: &mut SoundApp, rescan: bool) {
+    app.browser.plugins_loaded = true;
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        match std::thread::Builder::new().name("plugin browser scan".into()).spawn(move || {
+            let _ = tx.send(crate::plugin_browser::catalog(rescan));
+        }) {
+            Ok(_) => app.browser.plugin_scan = Some(rx),
+            Err(error) => app.ui.status = format!("Cannot scan plugins: {error}"),
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        app.browser.plugins = crate::plugin_browser::catalog(rescan);
+    }
+}
+
+fn poll_plugins(app: &mut SoundApp) {
+    let result = app.browser.plugin_scan.as_ref().map(|scan| scan.try_recv());
+    match result {
+        Some(Ok(plugins)) => {
+            app.browser.plugins = plugins;
+            app.browser.plugin_scan = None;
+        }
+        Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+            app.browser.plugin_scan = None;
+            app.ui.status = "Plugin scan stopped. Use Rescan installed plugins to retry.".into();
+        }
+        _ => {}
     }
 }
 
@@ -169,37 +220,45 @@ pub fn browser(app: &mut SoundApp, ui: &mut Ui) {
         });
         return;
     }
-    if category == "Plug-ins" && ui.button("Scan installed plugins").clicked() {
-        soundcraft_clap_host::scan();
-        soundcraft_vst3_host::scan();
+    poll_plugins(app);
+    if !app.browser.plugins_loaded && app.browser.plugin_scan.is_none() {
+        scan_plugins(app, false);
     }
-    let mut plugins: Vec<(String, String)> = soundcraft_dsp::plugins().iter()
-        .filter(|plugin| match category.as_str() {
-            "Instruments" => plugin.is_instrument,
-            "Effects" => !plugin.is_instrument,
-            _ => true,
-        })
-        .map(|plugin| (plugin.name.into(), plugin.id.into())).collect();
-    if category == "Plug-ins" {
-        for plugin in soundcraft_clap_host::cached().iter().flatten() {
-            plugins.push((format!("{} · CLAP", plugin.name), plugin.id.clone()));
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Group by");
+        ui.selectable_value(&mut app.browser.grouping, PluginGrouping::Developer, "Developer");
+        ui.selectable_value(&mut app.browser.grouping, PluginGrouping::Effect, "Effect");
+    });
+    egui::ComboBox::from_id_salt("browser_plugin_format").selected_text(app.browser.format.label()).show_ui(ui, |ui| {
+        for format in [PluginFormat::All, PluginFormat::Vst3, PluginFormat::Au, PluginFormat::Clap, PluginFormat::BuiltIn] {
+            ui.selectable_value(&mut app.browser.format, format, format.label());
         }
-        for plugin in soundcraft_vst3_host::cached().iter().flatten() {
-            plugins.push((format!("{} · VST3", plugin.name), plugin.id.clone()));
-        }
-        if ui.button("List Audio Units").clicked() {
-            let units = soundcraft_au_host::scan();
-            ui.ctx().data_mut(|data| data.insert_temp(egui::Id::new("browser_audio_units"), units.iter().map(|plugin| (format!("{} · AU", plugin.name), plugin.id.clone())).collect::<Vec<_>>()));
-        }
-        let units: Vec<(String, String)> = ui.ctx().data(|data| data.get_temp(egui::Id::new("browser_audio_units"))).unwrap_or_default();
-        plugins.extend(units);
+    });
+    if ui.add_enabled(app.browser.plugin_scan.is_none(), egui::Button::new("Rescan installed plugins")).clicked() {
+        scan_plugins(app, true);
     }
-    plugins.sort_by_cached_key(|(name, _)| name.to_lowercase());
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        for (name, plugin) in plugins {
-            if name.to_lowercase().contains(&query) {
-                row(app, ui, &name, BrowserItem::Plugin(plugin));
-            }
+    if app.browser.plugin_scan.is_some() {
+        ui.weak("Scanning installed plugins…");
+        ui.ctx().request_repaint_after_secs(0.05);
+    }
+    let instruments = match category.as_str() {
+        "Instruments" => Some(true),
+        "Effects" => Some(false),
+        _ => None,
+    };
+    let groups = crate::plugin_browser::groups(&app.browser.plugins, app.browser.grouping, app.browser.format, instruments, &query);
+    if groups.is_empty() {
+        ui.weak("No matching plugins");
+    }
+    egui::ScrollArea::vertical().id_salt("browser_plugin_groups").show(ui, |ui| {
+        for (group, plugins) in groups {
+            let id = ("browser_plugin_group", app.browser.grouping, app.browser.format, category.as_str(), group.as_str());
+            egui::CollapsingHeader::new(format!("{group} ({})", plugins.len())).id_salt(id).default_open(!query.is_empty()).show(ui, |ui| {
+                for plugin in plugins {
+                    let label = format!("{} · {}", plugin.name, plugin.format.label());
+                    row(app, ui, &label, BrowserItem::Plugin(plugin.id));
+                }
+            });
         }
     });
     ui.weak("Double-click to load, or drag into Track Devices");
@@ -307,7 +366,7 @@ pub fn chain(app: &mut SoundApp, ui: &mut Ui) {
         ui.label("Select a track to view its devices");
         return;
     };
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.strong(format!("DEVICES · {}", track.name));
         let input = ui.button(format!("Input: {}", crate::mix_window::input_name(app, &track)));
         crate::mix_window::route_popup(app, &input, track.id, true);
@@ -318,6 +377,23 @@ pub fn chain(app: &mut SoundApp, ui: &mut Ui) {
         }
         if ui.small_button("Hide").clicked() {
             app.ui.show_devices = false;
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
+        if track.kind == TrackKind::Audio {
+            input_meter(app, ui, track.id);
+            if let Some(problem) = input_route_problem(app, &track) {
+                ui.colored_label(Tokens::current().text_dim, problem);
+            }
+            let mut monitor = track.mixer.input_monitor;
+            if ui.checkbox(&mut monitor, "Monitor").changed() {
+                let _ = app.run("mix.input_monitor", json!({"track": track.id.0, "value": monitor}));
+            }
+        }
+        ui.label(format!("Input device: {}", app.input_status()));
+        ui.label(format!("Output device: {}", app.output_status()));
+        if ui.button("Audio Setup").clicked() {
+            let _ = app.run("window.playback_engine", json!({}));
         }
     });
     ui.separator();
@@ -352,4 +428,19 @@ pub fn chain(app: &mut SoundApp, ui: &mut Ui) {
     if let Some(item) = drop.dnd_release_payload::<BrowserItem>() {
         insert_item(app, track.id, &item);
     }
+}
+
+pub(crate) fn input_meter(app: &SoundApp, ui: &mut Ui, track: TrackId) {
+    let peak = app.input_meters.get(&track).map_or(0.0, |meter| meter.level.iter().copied().fold(0.0f32, f32::max));
+    let db = if peak > 0.0 && peak.is_finite() { 20.0 * peak.log10() } else { -60.0 };
+    let text = if peak > 0.00001 { format!("Input {db:.1} dBFS") } else { "Input −∞ dBFS".into() };
+    ui.add_sized([130.0, 16.0], egui::ProgressBar::new(((db + 60.0) / 60.0).clamp(0.0, 1.0)).text(text))
+        .on_hover_text("Assigned physical input, before track processing. Metering does not enable software monitoring.");
+}
+
+pub(crate) fn input_route_problem(app: &SoundApp, track: &soundcraft_model::Track) -> Option<String> {
+    let first = track.mixer.input.hardware_input_start()?;
+    let channels = app.recorder.as_ref()?.channels;
+    first.checked_add(track.channels()).is_none_or(|end| end > channels)
+        .then(|| format!("{} is outside the opened {channels}-channel input device", crate::mix_window::input_name(app, track)))
 }

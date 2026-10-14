@@ -200,6 +200,10 @@ where
     )
 }
 
+fn input_config_rank(channels: u16, format: cpal::SampleFormat) -> (std::cmp::Reverse<u16>, Option<usize>) {
+    (std::cmp::Reverse(channels), crate::devices::format_rank(format))
+}
+
 impl Recorder {
     /// Open the default input device. Errors when there is none (the caller shows a message).
     pub fn open() -> Result<Recorder, String> {
@@ -216,19 +220,17 @@ impl Recorder {
         let device = crate::devices::device(&host, audio.input.as_deref(), false).ok_or("no audio input device")?;
         #[allow(deprecated)]
         let name = device.name().unwrap_or_else(|_| "Input".into());
-        // At the chosen rate when the device offers it, so input and output run together: the
-        // best format first, then the most channels.
-        let at_rate = audio.sample_rate.and_then(|r| {
-            device
-                .supported_input_configs()
-                .ok()?
-                .filter(|c| crate::devices::format_rank(c.sample_format()).is_some() && c.min_sample_rate().0 <= r && c.max_sample_rate().0 >= r)
-                .min_by_key(|c| (crate::devices::format_rank(c.sample_format()), std::cmp::Reverse(c.channels())))
-                .map(|c| c.with_sample_rate(cpal::SampleRate(r)))
+        let default = device.default_input_config().map_err(|e| e.to_string())?;
+        let rate = audio.sample_rate.unwrap_or(default.sample_rate().0);
+        let at_rate = device.supported_input_configs().ok().and_then(|configs| {
+            configs
+                .filter(|config| crate::devices::format_rank(config.sample_format()).is_some() && config.min_sample_rate().0 <= rate && config.max_sample_rate().0 >= rate)
+                .min_by_key(|config| input_config_rank(config.channels(), config.sample_format()))
+                .map(|config| config.with_sample_rate(cpal::SampleRate(rate)))
         });
         let cfg = match at_rate {
             Some(c) => c,
-            None => device.default_input_config().map_err(|e| e.to_string())?,
+            None => default,
         };
         let format = cfg.sample_format();
         if crate::devices::format_rank(format).is_none() {
@@ -316,7 +318,7 @@ impl Recorder {
             _ => {}
         }
         let beats = self.shared.beats.load(Ordering::Relaxed);
-        if beats != self.seen.0 || !self.shared.armed.load(Ordering::Relaxed) {
+        if beats != self.seen.0 {
             self.seen = (beats, Instant::now());
         }
         (self.seen.1.elapsed() >= STALL).then(|| Trouble::Device(format!("“{name}” stopped sending audio")))
@@ -533,7 +535,9 @@ mod tests {
         assert_eq!(r.trouble(), None, "it sent again");
         shared.armed.store(false, Ordering::Release);
         r.seen.1 = Instant::now().checked_sub(STALL).unwrap();
-        assert_eq!(r.trouble(), None, "a quiet input that isn't recording is fine");
+        assert_eq!(r.trouble(), Some(Trouble::Device("“Mic In” stopped sending audio".into())));
+        shared.guarded(|| {});
+        assert_eq!(r.trouble(), None, "silent callbacks still keep an unarmed input healthy");
         shared.guarded(|| std::panic::panic_any("a bug in the input"));
         let mut ran = false;
         shared.guarded(|| ran = true);
@@ -747,5 +751,16 @@ mod ring_tests {
         let mut out = vec![vec![1.0f32; 4]];
         ring.pop_into(&mut out, 4, 48_000);
         assert_eq!(out[0], [0.5, 0.0, 0.0, -0.5]);
+    }
+}
+
+#[cfg(test)]
+mod input_config_tests {
+    use super::input_config_rank;
+
+    #[test]
+    fn physical_channel_coverage_precedes_sample_format_preference() {
+        assert!(input_config_rank(12, cpal::SampleFormat::I32) < input_config_rank(2, cpal::SampleFormat::F32));
+        assert!(input_config_rank(12, cpal::SampleFormat::F32) < input_config_rank(12, cpal::SampleFormat::I32));
     }
 }

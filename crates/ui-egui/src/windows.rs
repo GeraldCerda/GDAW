@@ -529,9 +529,7 @@ pub fn playback_engine(app: &mut SoundApp, ctx: &egui::Context) {
             }));
             ui.end_row();
             ui.label("Input");
-            ui.label(app.recorder.as_ref().map_or("opened on first record or monitor".to_string(), |r| {
-                format!("{} · {} Hz · {} ch", r.device_name, r.sample_rate, r.channels)
-            }));
+            ui.label(app.input_status());
             ui.end_row();
             ui.label("Session rate");
             let sr = app.engine.session().sample_rate.hz();
@@ -598,7 +596,8 @@ pub fn audio_device_command(app: &mut SoundApp, p: &serde_json::Value) -> Result
     let device = app.player.as_ref().map(|pl| {
         json!({"name": pl.device_name, "sample_rate": pl.device_rate, "channels": pl.device_channels, "buffer_size": pl.device_buffer, "silent": pl.silent})
     });
-    let mut out = json!({"config": app.ui.audio, "device": device});
+    let input = app.recorder.as_ref().map(|recorder| json!({"name": recorder.device_name, "sample_rate": recorder.sample_rate, "channels": recorder.channels}));
+    let mut out = json!({"config": app.ui.audio, "device": device, "input_device": input, "input_status": app.input_status(), "output_status": app.output_status()});
     if p.get("list").and_then(Value::as_bool).unwrap_or(false) {
         out["systems"] = json!(soundcraft_playback::devices::audio_systems());
     }
@@ -637,15 +636,18 @@ pub fn io_setup(app: &mut SoundApp, ctx: &egui::Context) {
                 app.ui.show_playback_engine = true;
             }
         });
-        ui.label("Assign the input channels recorded and monitored by each audio track.");
+        ui.label(app.input_status());
+        ui.label(format!("Output device: {}", app.output_status()));
+        ui.label("Physical input levels are visible before record enable. Monitor controls whether the input is heard.");
         let tracks: Vec<_> = app.engine.session().tracks.iter()
             .filter(|track| track.kind == soundcraft_model::TrackKind::Audio)
             .map(|track| (track.id, track.name.clone(), track.channels(), crate::mix_window::input_name(app, track), track.mixer.record_arm, track.mixer.input_monitor))
             .collect();
         egui::ScrollArea::vertical().max_height(190.0).show(ui, |ui| {
-            egui::Grid::new("hardware_input_matrix").num_columns(4).spacing(vec2(12.0, 6.0)).striped(true).show(ui, |ui| {
+            egui::Grid::new("hardware_input_matrix").num_columns(5).spacing(vec2(12.0, 6.0)).striped(true).show(ui, |ui| {
                 ui.strong("Audio track");
                 ui.strong("Physical input");
+                ui.strong("Input level");
                 ui.strong("Record");
                 ui.strong("Monitor");
                 ui.end_row();
@@ -664,6 +666,14 @@ pub fn io_setup(app: &mut SoundApp, ctx: &egui::Context) {
                             }
                         } else {
                             ui.label("No compatible hardware channels");
+                        }
+                    });
+                    ui.vertical(|ui| {
+                        crate::devices::input_meter(app, ui, id);
+                        if let Some(track) = app.engine.session().track(id)
+                            && let Some(problem) = crate::devices::input_route_problem(app, track)
+                        {
+                            ui.small(problem);
                         }
                     });
                     let mut record = armed;

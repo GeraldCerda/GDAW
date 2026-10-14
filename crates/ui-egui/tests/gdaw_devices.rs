@@ -5,7 +5,8 @@ use soundcraft_ui_egui::{MainWindow, Services, SoundApp, devices::{BrowserItem, 
 
 fn harness() -> Harness<'static, SoundApp> {
     let engine = soundcraft_engine::Engine::new(soundcraft_engine::starter_session("G", soundcraft_engine::model::time::SampleRate::HZ_48000));
-    let app = SoundApp::new(engine, None, Services::default());
+    let mut app = SoundApp::new(engine, None, Services::default());
+    app.browser.plugins_loaded = true;
     let mut harness = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_ui_state(|ui, app: &mut SoundApp| {
         app.logic(&ui.ctx().clone());
         app.ui(ui);
@@ -47,4 +48,13 @@ fn browser_effects_append_to_the_selected_track_and_can_be_undone() {
     assert_eq!(inserts[1].as_ref().unwrap().plugin, "eq_7band");
     harness.state_mut().run("edit.undo", json!({})).unwrap();
     assert!(harness.state().engine.session().track(track).unwrap().mixer.inserts[1].is_none());
+}
+
+#[test]
+fn plugin_browser_exposes_developer_effect_and_format_choices() {
+    let harness = harness();
+    assert!(harness.query_all_by_label_contains("Developer").count() > 0);
+    assert!(harness.query_all_by_label_contains("Effect").count() > 0);
+    assert!(harness.query_all_by_label_contains("All formats").count() > 0);
+    assert_eq!(harness.state().browser.grouping, soundcraft_ui_egui::plugin_browser::PluginGrouping::Developer);
 }
