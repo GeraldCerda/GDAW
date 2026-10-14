@@ -138,9 +138,20 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
         op = Some(("event.quantize", json!({"grid": grid_ticks, "strength": 100})));
     }
     let selected_grid = app.engine.session().edit.grid;
-    egui::ComboBox::from_id_salt(("midi-grid", cid.0)).width(84.0).selected_text(format!("Grid {}", selected_grid.label())).show_ui(&mut tb, |ui| {
-        for (label, value) in [("1 bar", "1 bar"), ("1/4", "1/4"), ("1/8", "1/8"), ("1/16", "1/16"), ("1/32", "1/32"), ("1/64", "1/64"), ("1/8T", "1/8t"), ("1/16T", "1/16t"), ("1/32T", "1/32t")] {
-            if ui.selectable_label(selected_grid.label() == soundcraft_time::GridValue::Note { value: match value { "1 bar" => NoteValue::Bar, "1/4" => NoteValue::Quarter, "1/8" | "1/8t" => NoteValue::Eighth, "1/16" | "1/16t" => NoteValue::Sixteenth, "1/32" | "1/32t" => NoteValue::ThirtySecond, _ => NoteValue::SixtyFourth }, dotted: false, triplet: value.ends_with('t') }.label(), label).clicked() {
+    egui::ComboBox::from_id_salt(("midi-grid", cid.0)).width(100.0).selected_text(selected_grid.label()).show_ui(&mut tb, |ui| {
+        for (label, value, note, triplet) in [
+            ("1 bar", "1 bar", NoteValue::Bar, false),
+            ("1/4", "1/4", NoteValue::Quarter, false),
+            ("1/8", "1/8", NoteValue::Eighth, false),
+            ("1/16", "1/16", NoteValue::Sixteenth, false),
+            ("1/32", "1/32", NoteValue::ThirtySecond, false),
+            ("1/64", "1/64", NoteValue::SixtyFourth, false),
+            ("1/8T", "1/8t", NoteValue::Eighth, true),
+            ("1/16T", "1/16t", NoteValue::Sixteenth, true),
+            ("1/32T", "1/32t", NoteValue::ThirtySecond, true),
+        ] {
+            let chosen = soundcraft_time::GridValue::Note { value: note, dotted: false, triplet };
+            if ui.selectable_label(selected_grid == chosen, label).clicked() {
                 let _ = app.run("view.grid", json!({"value": value}));
             }
         }
