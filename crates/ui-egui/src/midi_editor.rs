@@ -163,6 +163,7 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
     let s = app.engine.session_arc();
     let sr = s.sample_rate;
     let base_tick = s.tempo.samples_to_ticks(clip.start, sr);
+    let bar_ticks = s.tempo.meter_at_tick(base_tick).ticks_per_bar().max(1);
     let len_ticks = (s.tempo.samples_to_ticks(clip.end(), sr) - base_tick).max(1);
     let roll = Rect::from_min_max(pos2(full.min.x + KEY_W, header.max.y), pos2(full.max.x - 4.0, full.max.y - VEL_H - 4.0));
     let keys = Rect::from_min_max(pos2(full.min.x, roll.min.y), pos2(roll.min.x, roll.max.y));
@@ -180,7 +181,7 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
     }
     app.midi.scroll = app.midi.scroll.clamp(0.0, (128.0 * ROW_H - roll.height()).max(0.0));
     let scroll = app.midi.scroll;
-    let px_per_tick = f64::from(roll.width()) / len_ticks as f64;
+    let px_per_tick = f64::from(roll.width().max(1.0)) / len_ticks as f64;
     let x_of = |tick: i64| (f64::from(roll.min.x) + tick as f64 * px_per_tick) as f32;
     let y_of = |pitch: i32| roll.min.y + (127 - pitch) as f32 * ROW_H - scroll;
     let pitch_at = |y: f32| 127 - ((y - roll.min.y + scroll) / ROW_H).floor() as i32;
@@ -208,9 +209,9 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
     // Grid.
     let mut tick = 0;
     while tick <= len_ticks {
-        let bar = tick % (TICKS_PER_QUARTER * 4) == 0;
+        let bar = (base_tick + tick).rem_euclid(bar_ticks) == 0;
         let x = x_of(tick);
-        if grid_ticks as f32 * px_per_tick > 4.0 || bar {
+        if grid_ticks as f64 * px_per_tick > 4.0 || bar {
             painter.line_segment(
                 [pos2(x, roll.min.y), pos2(x, roll.max.y)],
                 Stroke::new(1.0, if bar { Color32::from_rgb(80, 80, 86) } else { Color32::from_rgb(50, 50, 54) }),
