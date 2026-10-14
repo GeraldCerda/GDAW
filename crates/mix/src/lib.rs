@@ -909,7 +909,7 @@ fn process_strip(
     }
     let transport = transport_at(s, pos, !live.monitor_only, live.recording);
     match t.kind {
-        TrackKind::Audio if !live.input.is_empty() && (t.mixer.input_monitor || (t.mixer.record_arm && (live.monitor_only || live.recording))) => {
+        TrackKind::Audio if !live.input.is_empty() && t.mixer.input_monitor => {
             // Input monitoring: the track hears its hardware input instead of its clips.
             let first = match &t.mixer.input {
                 Route::Hardware(h) => {
@@ -917,9 +917,8 @@ fn process_strip(
                 }
                 _ => 0,
             };
-            let n_in = live.input.len().max(1);
             for (k, dst) in strip.buf.iter_mut().enumerate() {
-                if let Some(src) = live.input.get((first + k) % n_in) {
+                if let Some(src) = live.input.get(first.saturating_add(k)) {
                     for (d, x) in dst.iter_mut().zip(src.iter()).take(frames) {
                         *d = *x;
                     }
@@ -3043,6 +3042,21 @@ mod tests {
         s.track_mut(t).unwrap().mixer.input_monitor = false;
         eng.render(&s, 1024, 512, &mut out);
         assert!(out[0][100].abs() < 1e-6, "stopped, unmonitored: silence");
+    }
+
+    #[test]
+    fn armed_track_requires_explicit_input_monitoring() {
+        let (mut s, t) = session_with_dc(0.5, 4800);
+        s.track_mut(t).unwrap().mixer.record_arm = true;
+        let mut eng = MixEngine::new(48_000.0, 512);
+        eng.input = vec![vec![0.25; 512]];
+        eng.monitor_only = true;
+        let mut out = vec![vec![0.0; 512]; 2];
+        eng.render(&s, 0, 512, &mut out);
+        assert!(out.iter().all(|channel| channel.iter().all(|sample| sample.abs() < 1e-6)));
+        s.track_mut(t).unwrap().mixer.input_monitor = true;
+        eng.render(&s, 0, 512, &mut out);
+        assert!(out[0][100].abs() > 0.1);
     }
 
     #[test]
