@@ -55,6 +55,32 @@ fn is_black(p: i32) -> bool {
     matches!(p.rem_euclid(12), 1 | 3 | 6 | 8 | 10)
 }
 
+fn grid_stride(grid_ticks: i64, len_ticks: i64, width: f32) -> i64 {
+    let grid = grid_ticks.max(1);
+    let budget = (f64::from(width.max(1.0)) / 4.0).floor().clamp(1.0, 4096.0) as i64;
+    let cells = len_ticks.max(1) / grid;
+    let multiple = cells / budget + i64::from(cells % budget != 0);
+    grid.saturating_mul(multiple.max(1))
+}
+
+fn snapped_delta(pixels: f32, px_per_tick: f64, grid_ticks: i64) -> i64 {
+    if !pixels.is_finite() || !px_per_tick.is_finite() || px_per_tick <= 0.0 {
+        return 0;
+    }
+    let grid = grid_ticks.max(1);
+    ((f64::from(pixels) / px_per_tick / grid as f64).round() as i64).saturating_mul(grid)
+}
+
+fn selected_indices(result: &serde_json::Value) -> Vec<usize> {
+    result["indices"].as_array().map(|indices| {
+        indices.iter().filter_map(serde_json::Value::as_u64).filter_map(|index| usize::try_from(index).ok()).collect()
+    }).unwrap_or_default()
+}
+
+fn resized_length(length: i64, delta: i64, grid: i64) -> i64 {
+    length.saturating_add(delta).max(grid.min(length).max(1))
+}
+
 pub fn show(app: &mut SoundApp, ui: &mut Ui) {
     // Painter-only contents do not advance the layout. Claim the resized
     // space, including the empty state, so the dock keeps its chosen height.
@@ -89,6 +115,12 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
     let Some((track, clip)) = app.engine.session().find_clip(cid).map(|(t, c)| (t, c.clone())) else { return };
     let ClipContent::Midi { sequence } = &clip.content else { return };
     let track_color = app.engine.session().track(track).map_or([120, 120, 200], |t| t.color);
+    if app.midi.clip != Some(cid) {
+        app.midi.selected.clear();
+        app.midi.drag = None;
+        app.midi.band = None;
+    }
+    app.midi.selected.retain(|index| *index < sequence.notes.len());
     ui.painter().text(
         pos2(header.min.x + 110.0, header.center().y),
         Align2::LEFT_CENTER,
@@ -159,12 +191,12 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
     if let Some((id, mut p)) = op {
         p["clips"] = json!([cid.0]);
         let _ = app.run(id, p);
+        app.midi.selected.clear();
     }
     let s = app.engine.session_arc();
     let sr = s.sample_rate;
     let base_tick = s.tempo.samples_to_ticks(clip.start, sr);
-    let bar_ticks = s.tempo.meter_at_tick(base_tick).ticks_per_bar().max(1);
-    let len_ticks = (s.tempo.samples_to_ticks(clip.end(), sr) - base_tick).max(1);
+    let len_ticks = s.tempo.samples_to_ticks(clip.end(), sr).saturating_sub(base_tick).max(1);
     let roll = Rect::from_min_max(pos2(full.min.x + KEY_W, header.max.y), pos2(full.max.x - 4.0, full.max.y - VEL_H - 4.0));
     let keys = Rect::from_min_max(pos2(full.min.x, roll.min.y), pos2(roll.min.x, roll.max.y));
     let vel = Rect::from_min_max(pos2(roll.min.x, roll.max.y + 4.0), pos2(roll.max.x, full.max.y - 2.0));
@@ -207,17 +239,38 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
         }
     }
     // Grid.
-    let mut tick = 0;
-    while tick <= len_ticks {
-        let bar = (base_tick + tick).rem_euclid(bar_ticks) == 0;
-        let x = x_of(tick);
-        if grid_ticks as f64 * px_per_tick > 4.0 || bar {
-            painter.line_segment(
-                [pos2(x, roll.min.y), pos2(x, roll.max.y)],
-                Stroke::new(1.0, if bar { Color32::from_rgb(80, 80, 86) } else { Color32::from_rgb(50, 50, 54) }),
-            );
+    let stride = grid_stride(grid_ticks, len_ticks, roll.width());
+    let mut tick = 0i64;
+    for _ in 0..=4096 {
+        if tick > len_ticks {
+            break;
         }
-        tick += grid_ticks;
+        let x = x_of(tick);
+        painter.line_segment([pos2(x, roll.min.y), pos2(x, roll.max.y)], Stroke::new(1.0, Color32::from_rgb(50, 50, 54)));
+        let next = tick.saturating_add(stride);
+        if next <= tick {
+            break;
+        }
+        tick = next;
+    }
+    let first_bar = s.tempo.bar_beat_at_tick(base_tick).bar;
+    let last_bar = s.tempo.bar_beat_at_tick(base_tick.saturating_add(len_ticks)).bar;
+    let bar_stride = grid_stride(1, last_bar.saturating_sub(first_bar).max(1), roll.width());
+    let mut bar = first_bar;
+    for _ in 0..=4096 {
+        if bar > last_bar {
+            break;
+        }
+        let tick = s.tempo.bar_start_tick(bar).saturating_sub(base_tick);
+        if (0..=len_ticks).contains(&tick) {
+            let x = x_of(tick);
+            painter.line_segment([pos2(x, roll.min.y), pos2(x, roll.max.y)], Stroke::new(1.0, Color32::from_rgb(80, 80, 86)));
+        }
+        let next = bar.saturating_add(bar_stride);
+        if next <= bar {
+            break;
+        }
+        bar = next;
     }
     // Notes.
     let base = egui::Color32::from_rgb(track_color[0], track_color[1], track_color[2]);
@@ -229,14 +282,14 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
         {
             if d.resize {
                 if d.index == i {
-                    ln = (ln + d.dx_ticks).max(grid_ticks.min(ln).max(1));
+                    ln = resized_length(ln, d.dx_ticks, grid_ticks);
                 }
             } else {
-                st = (st + d.dx_ticks).max(0);
+                st = st.saturating_add(d.dx_ticks).max(0);
                 p = (p + d.dy_semi as i32).clamp(0, 127);
             }
         }
-        let r = Rect::from_min_max(pos2(x_of(st), y_of(p) + 1.0), pos2(x_of(st + ln).max(x_of(st) + 3.0), y_of(p) + ROW_H - 1.0));
+        let r = Rect::from_min_max(pos2(x_of(st), y_of(p) + 1.0), pos2(x_of(st.saturating_add(ln)).max(x_of(st) + 3.0), y_of(p) + ROW_H - 1.0));
         let sel = app.midi.selected.contains(&i);
         let k = 0.45 + 0.55 * f32::from(n.velocity) / 127.0;
         let fill = if sel {
@@ -252,14 +305,14 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
         sequence.notes.iter().enumerate().rev().find_map(|(i, n)| {
             let r = Rect::from_min_max(
                 pos2(x_of(n.start), y_of(i32::from(n.pitch))),
-                pos2(x_of(n.start + n.length).max(x_of(n.start) + 3.0), y_of(i32::from(n.pitch)) + ROW_H),
+                pos2(x_of(n.start.saturating_add(n.length)).max(x_of(n.start) + 3.0), y_of(i32::from(n.pitch)) + ROW_H),
             );
             r.contains(pos).then_some((i, pos.x > r.max.x - 5.0))
         })
     };
-    let snap = |pixels: f32| -> i64 { ((f64::from(pixels) / px_per_tick / grid_ticks as f64).round() as i64).saturating_mul(grid_ticks) };
+    let snap = |pixels: f32| snapped_delta(pixels, px_per_tick, grid_ticks);
     if resp.drag_started()
-        && let Some(p) = resp.interact_pointer_pos()
+        && let Some(p) = ui.input(|input| input.pointer.press_origin()).filter(|point| roll.contains(*point))
     {
         if let Some((i, edge)) = hit(p) {
             if !app.midi.selected.contains(&i) {
@@ -288,7 +341,7 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
                 .filter(|(_, n)| {
                     let r = Rect::from_min_max(
                         pos2(x_of(n.start), y_of(i32::from(n.pitch))),
-                        pos2(x_of(n.start + n.length), y_of(i32::from(n.pitch)) + ROW_H),
+                        pos2(x_of(n.start.saturating_add(n.length)), y_of(i32::from(n.pitch)) + ROW_H),
                     );
                     r.intersects(band)
                 })
@@ -307,12 +360,15 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
         && let Some(d) = app.midi.drag.take()
     {
         if d.resize {
-            if let Some(n) = sequence.notes.get(d.index) {
-                let _ = app.run("midi.note_edit", json!({"clip": cid.0, "index": d.index, "length_ticks": (n.length + d.dx_ticks).max(1)}));
+            if let Some(n) = sequence.notes.get(d.index)
+                && let Ok(result) = app.run("midi.note_edit", json!({"clip": cid.0, "index": d.index, "length_ticks": resized_length(n.length, d.dx_ticks, grid_ticks)}))
+            {
+                app.midi.selected = result["index"].as_u64().map(|index| vec![index as usize]).unwrap_or_default();
             }
-        } else if d.dx_ticks != 0 || d.dy_semi != 0 {
-            let _ = app.run("midi.notes_move", json!({"clip": cid.0, "indices": app.midi.selected, "ticks": d.dx_ticks, "semitones": d.dy_semi}));
-            app.midi.selected.clear();
+        } else if (d.dx_ticks != 0 || d.dy_semi != 0)
+            && let Ok(result) = app.run("midi.notes_move", json!({"clip": cid.0, "indices": app.midi.selected, "ticks": d.dx_ticks, "semitones": d.dy_semi}))
+        {
+            app.midi.selected = selected_indices(&result);
         }
     }
     if resp.clicked()
@@ -372,8 +428,10 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
         } else {
             0
         };
-        if (semi != 0 || ticks != 0) && !app.midi.selected.is_empty() {
-            let _ = app.run("midi.notes_move", json!({"clip": cid.0, "indices": app.midi.selected, "ticks": ticks, "semitones": semi}));
+        if (semi != 0 || ticks != 0) && !app.midi.selected.is_empty()
+            && let Ok(result) = app.run("midi.notes_move", json!({"clip": cid.0, "indices": app.midi.selected, "ticks": ticks, "semitones": semi}))
+        {
+            app.midi.selected = selected_indices(&result);
         }
     }
     if !app.midi.selected.is_empty()
@@ -400,6 +458,45 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
         && (x_of(n.start) - p.x).abs() < 8.0
     {
         let v = (((vel.max.y - 2.0 - p.y) / (vel.height() - 4.0)) * 127.0).round().clamp(1.0, 127.0) as i64;
-        let _ = app.engine.execute_merged("midi.note_edit", &json!({"clip": cid.0, "index": i, "velocity": v}), &format!("vel:{}", cid.0));
+        if let Ok(result) = app.engine.execute_merged("midi.note_edit", &json!({"clip": cid.0, "index": i, "velocity": v}), &format!("vel:{}", cid.0))
+            && let Some(index) = result["index"].as_u64()
+            && app.midi.selected.contains(&i)
+        {
+            app.midi.selected = vec![index as usize];
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dense_grids_have_a_bounded_number_of_lines() {
+        for length in [960, 960_000, i64::MAX] {
+            let stride = grid_stride(60, length, 1200.0);
+            assert!(stride >= 60);
+            assert_eq!(stride % 60, 0);
+            assert!(length / stride <= 300);
+        }
+        assert_eq!(grid_stride(240, 3840, 1200.0), 240);
+    }
+
+    #[test]
+    fn pixel_deltas_snap_symmetrically_with_triplet_precision() {
+        let scale = 0.125;
+        assert_eq!(snapped_delta(40.0, scale, 320), 320);
+        assert_eq!(snapped_delta(-40.0, scale, 320), -320);
+        assert_eq!(snapped_delta(14.0, scale, 240), 0);
+        assert_eq!(snapped_delta(16.0, scale, 240), 240);
+        assert_eq!(snapped_delta(f32::NAN, scale, 240), 0);
+        assert_eq!(snapped_delta(40.0, 0.0, 240), 0);
+    }
+
+    #[test]
+    fn resizing_keeps_preview_and_commit_above_the_same_minimum() {
+        assert_eq!(resized_length(480, -1000, 240), 240);
+        assert_eq!(resized_length(60, -1000, 240), 60);
+        assert_eq!(resized_length(i64::MAX, 240, 240), i64::MAX);
     }
 }

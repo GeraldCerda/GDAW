@@ -55,3 +55,28 @@ fn deleting_in_the_editor_still_removes_the_selected_notes() {
         assert!(h.state().midi.selected.is_empty());
     }
 }
+
+#[test]
+fn switching_clips_clears_the_previous_note_selection_and_gesture() {
+    let mut h = harness(false);
+    let keys = h.state().engine.session().track_by_name("Keys").unwrap().id;
+    let clip = h.state_mut().run("midi.new_clip", json!({"track": keys.0, "start": 192_000, "end": 288_000})).unwrap()["clip"].clone();
+    h.state_mut().run("midi.note_add", json!({"clip": clip, "pitch": 60, "start_ticks": 0})).unwrap();
+    h.state_mut().midi.selected = vec![0];
+    h.state_mut().midi.band = Some(egui::pos2(10.0, 10.0));
+    h.state_mut().midi.drag = Some(soundcraft_ui_egui::midi_editor::NoteDrag {
+        index: 0,
+        resize: false,
+        start: egui::pos2(10.0, 10.0),
+        dx_ticks: 240,
+        dy_semi: 1,
+    });
+    h.state_mut().run("edit.select", json!({"clips": [clip]})).unwrap();
+    h.run_steps(2);
+    assert!(h.state().midi.selected.is_empty());
+    assert!(h.state().midi.drag.is_none());
+    assert!(h.state().midi.band.is_none());
+    let before = h.state().engine.session().clone();
+    press(&mut h, Key::Delete);
+    assert!(*h.state().engine.session() == before);
+}
