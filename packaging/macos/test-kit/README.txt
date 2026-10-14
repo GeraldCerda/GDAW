@@ -1,6 +1,6 @@
 GDAW Mac Test Kit v4
 
-Source revision: 97cf05fdc911a6684bc326d19d9c5197fcd31a33
+Source revision: aeb3a7d2930262a8c468df4b5b6307ac4a6838a3
 Repository: https://github.com/GeraldCerda/GDAW
 
 This kit contains source-download, build and launch scripts. It downloads the complete pinned source from your fork when you run it on your Mac. No binary is included and no DAW build was performed while preparing this kit.
@@ -61,6 +61,14 @@ Regression tests were added but not executed during source preparation. This sou
 
 EDIT/MIX AUDIT UPDATE
 
-Pinned source 97cf05fdc911a6684bc326d19d9c5197fcd31a33 adds distinct Inserts A-E and Sends A-E to both starter tracks, keeps all five slots visible at medium heights, accepts browser effects in exact insert slots, shares developer/effect/format menus with the browser, adds Edit I/O fader/pan controls, and prevents mixer section overlap with vertical scrolling. Old preferences get a one-time visible-column migration. New sessions use absolute eighth-note Grid mode.
+Pinned source aeb3a7d2930262a8c468df4b5b6307ac4a6838a3 adds distinct Inserts A-E and Sends A-E to both starter tracks, keeps all five slots visible at medium heights, accepts browser effects in exact insert slots, shares developer/effect/format menus with the browser, adds Edit I/O fader/pan controls, and prevents mixer section overlap with vertical scrolling. Old preferences get a one-time visible-column migration. New sessions use absolute eighth-note Grid mode.
 
 The source audit and remaining gaps are in docs/GDAW_EDIT_MIX_AUDIT_2026-10-14.md. Syntax parsing and shell syntax checks were performed; no Rust tests, app compilation or hardware testing were run while preparing this update. Full Pro Tools shortcut parity and the complete Ableton Drum Rack feature set remain unfinished. This source pin is not a production-readiness certification.
+
+DRUM RACK RELIABILITY FOLLOW-UP
+
+Native drum-library discovery runs in a cancellable background worker. Changing or clearing the library discards old results; Rescan drum library retries discovery. Random kits skip unreadable files and fill available pads in order, report the skipped count, and remain one undo step. Explicit kit loads remain strict unless skip_invalid is requested; all-invalid replacements roll back.
+
+Stopped rack previews retire the previous track's one-shot voices when switching tracks. Play/Locate clear stale preview timers. Replacing or clearing a sampler's audio clears MIDI events queued for the old sample.
+
+Eight additional regression tests were added. Seven edited Rust files passed syntax parsing; Rust compilation, tests, Mac window/audio checks were not run here. Sample decoding remains on the existing command path, and stopped audition still has its existing two-second limit.
