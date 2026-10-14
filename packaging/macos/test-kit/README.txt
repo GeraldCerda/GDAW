@@ -1,6 +1,6 @@
 GDAW Mac Test Kit v4
 
-Source revision: 4733b8c4b100cf76f54e35cb4b71ebb94257ec7a
+Source revision: 75f9e4d51fe5f5b47bb9a26f79d11eee056fd7f5
 Repository: https://github.com/GeraldCerda/GDAW
 
 This kit contains source-download, build and launch scripts. It downloads the complete pinned source from your fork when you run it on your Mac. No binary is included and no DAW build was performed while preparing this kit.
@@ -45,3 +45,16 @@ Manual checks:
 10. Check the layout on your actual screen size and verify no panels obscure the timeline or essential controls.
 
 Ready for diagnostic testing only. Rust compilation and tests, macOS launch, microphone permissions, hardware I/O, plugin hosting and icon conversion were not executed during preparation. Added regression tests are present in source but unrun here.
+
+Current UI update:
+The rack uses Ableton-style pad order and octave labels, with C1 at MIDI note 36 and D#2 at note 51. The empty rack has a clickable library-assignment area to its right. Choose your own drum sample folder; the folder persists in preferences. Empty racks receive up to 16 distinct randomly chosen samples from that folder. Existing pad assignments are preserved. Load random kit explicitly replaces the kit in one undo step. Library traversal and file sizes are bounded; no audio files are bundled or fetched externally. A populated rack shows the selected pad waveform, sample loading, tuning, pan, gain and mute controls.
+
+Light appearance is the default, with a one-time migration of old appearance preferences. New GDAW sessions use an eighth-note grid and Bars|Beats. Subdivision lines are half-point strokes and remain visible down to two pixels between lines. Existing session grid settings remain saved with each session.
+
+Cmd+= now shows or hides the separate mixer while keeping Edit in the main window. Mac corrections include Cmd+1..7 tools, Smart Tool F-key combinations, Cmd+[ and Cmd+] zoom, Commands Focus R/T zoom, Control+1..5 zoom presets, Control+E Zoom Toggle, Return navigation, Control+Shift+S search, Control+Shift+K shortcut list and MIDI/Score editor shortcuts.
+
+Complete Pro Tools shortcut parity is unfinished. The egui input layer does not preserve all number-row versus keypad distinctions. Keypad-only windows and keypad Enter require a native input bridge; their labels identify the intended keypad assignments. Commands for features absent in GDAW remain unavailable. This update does not claim a complete reproduction of Ableton Drum Rack, per-pad effect chains or its entire sample-editor feature set.
+
+Native VST3/CLAP discovery remains isolated in per-bundle helper processes. Runtime plugin processing after insertion remains in-process.
+
+Regression tests were added but not executed during source preparation. This source revision needs a Mac compile, UI checks and microphone/hardware testing.
