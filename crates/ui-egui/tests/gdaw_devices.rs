@@ -5,8 +5,7 @@ use soundcraft_ui_egui::{MainWindow, Services, SoundApp, devices::{BrowserItem, 
 
 fn harness() -> Harness<'static, SoundApp> {
     let engine = soundcraft_engine::Engine::new(soundcraft_engine::starter_session("G", soundcraft_engine::model::time::SampleRate::HZ_48000));
-    let mut app = SoundApp::new(engine, None, Services::default());
-    app.browser.plugins_loaded = true;
+    let app = SoundApp::new(engine, None, Services::default());
     let mut harness = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_ui_state(|ui, app: &mut SoundApp| {
         app.logic(&ui.ctx().clone());
         app.ui(ui);
@@ -57,4 +56,11 @@ fn plugin_browser_exposes_developer_effect_and_format_choices() {
     assert!(harness.query_all_by_label_contains("Effect").count() > 0);
     assert!(harness.query_all_by_label_contains("All formats").count() > 0);
     assert_eq!(harness.state().browser.grouping, soundcraft_ui_egui::plugin_browser::PluginGrouping::Developer);
+}
+
+#[test]
+fn headless_editor_does_not_start_native_plugin_discovery() {
+    let harness = harness();
+    assert!(!harness.state().browser.plugins_loaded);
+    assert!(harness.state().browser.plugin_scan.is_none());
 }

@@ -1531,11 +1531,21 @@ fn fade_curve_points(fade: soundcraft_model::Fade, fade_in: bool, a: f32, b: f32
         .collect()
 }
 
-fn fade_control_position(fade: soundcraft_model::Fade, a: f32, b: f32, body: Rect) -> Pos2 {
-    let padding = body.height().clamp(0.0, 8.0) * 0.5;
+fn fade_control_position(fade: soundcraft_model::Fade, a: f32, b: f32, body: Rect, visible: Rect) -> Option<Pos2> {
+    let visible = body.intersect(visible);
+    let inset = 4.5;
+    if visible.width() < inset * 2.0 || visible.height() < inset * 2.0 {
+        return None;
+    }
+    let x = a + (b - a) * 0.5;
     let y = body.max.y - body.height() * fade.gain(0.5);
-    // Keep the whole handle inside the body when a bend approaches an edge.
-    pos2((a + b) * 0.5, y.max(body.min.y + padding).min(body.max.y - padding))
+    if !x.is_finite() || !y.is_finite() || x < visible.min.x || x > visible.max.x {
+        return None;
+    }
+    Some(pos2(
+        x.clamp(visible.min.x + inset, visible.max.x - inset),
+        y.clamp(visible.min.y + inset, visible.max.y - inset),
+    ))
 }
 
 fn clip_preview_fades(clip: &Clip, gesture: Option<&Gesture>) -> (soundcraft_model::Fade, soundcraft_model::Fade) {
@@ -1727,12 +1737,15 @@ fn draw_clip(app: &SoundApp, painter: &egui::Painter, s: &Session, track: &Track
             if side { (x0, x_of(s, tl, clip.start.saturating_add(fade.len))) } else { (x_of(s, tl, clip.end().saturating_sub(fade.len)), x1) };
         let pts = fade_curve_points(fade, side, a, b, body_r, painter.ctx().pixels_per_point());
         painter.with_clip_rect(vis).add(Shape::line(pts, Stroke::new(1.2, fade_col)));
-        let midpoint = fade_control_position(fade, a, b, body_r);
+        let control_clip = vis.intersect(tl).intersect(painter.clip_rect());
+        let midpoint = fade_control_position(fade, a, b, body_r, control_clip);
         let active = matches!(app.gesture, Some(Gesture::FadeCurve { clip: id, fade_in, .. }) if id == clip.id && fade_in == side);
-        let hovered = painter.ctx().input(|i| i.pointer.hover_pos()).is_some_and(|p| near_fade_midpoint(p, midpoint));
-        if !dim && s.edit.tool == Tool::Smart && AutoParam::parse(&track.view).is_none() && b - a >= 32.0 && vis.contains(midpoint) {
+        let hovered = midpoint.is_some_and(|midpoint| painter.ctx().input(|i| i.pointer.hover_pos()).is_some_and(|p| near_fade_midpoint(p, midpoint)));
+        if !dim && s.edit.tool == Tool::Smart && AutoParam::parse(&track.view).is_none() && b - a >= 32.0
+            && let Some(midpoint) = midpoint
+        {
             let col = Color32::from_rgba_unmultiplied(255, 255, 255, if active || hovered { 230 } else { 200 });
-            painter.with_clip_rect(vis).circle(midpoint, 3.5, body, Stroke::new(1.0, col));
+            painter.with_clip_rect(control_clip).circle(midpoint, 3.5, body, Stroke::new(1.0, col));
         }
     }
     // The fade-out of the clip this one crossfades with, drawn over the overlap.
@@ -1912,8 +1925,7 @@ fn fade_midpoint(s: &Session, tl: Rect, lane: Rect, clip: &Clip, fade_in: bool) 
         return None;
     }
     let body = Rect::from_min_max(pos2(a, lane.min.y + 1.0 + clip_name_height(s, lane)), pos2(b, lane.max.y - 1.0));
-    let p = fade_control_position(fade, a, b, body);
-    lane.contains(p).then_some(p)
+    fade_control_position(fade, a, b, body, lane.intersect(tl))
 }
 
 fn fade_curve_handle_at(s: &Session, tl: Rect, lane: Rect, clip: &Clip, p: Pos2) -> Option<bool> {
@@ -3398,6 +3410,25 @@ mod tests {
             .collect();
         assert_eq!(controls.len(), 1, "the midpoint must stay visible without hover or a held mouse button");
         controls[0]
+    }
+
+    #[test]
+    fn fade_controls_fit_partially_visible_lanes_and_reject_hidden_midpoints() {
+        let body = Rect::from_min_max(pos2(100.0, 100.0), pos2(500.0, 700.0));
+        let viewport = Rect::from_min_max(pos2(100.0, 120.0), pos2(500.0, 350.0));
+        for shape in soundcraft_model::FadeShape::ALL {
+            for curvature in [-1.0, 0.0, 1.0] {
+                let fade = soundcraft_model::Fade { len: 1000, shape, curvature };
+                let control = fade_control_position(fade, 100.0, 500.0, body, viewport).unwrap();
+                for offset in [vec2(4.0, 0.0), vec2(-4.0, 0.0), vec2(0.0, 4.0), vec2(0.0, -4.0)] {
+                    assert!(viewport.contains(control + offset));
+                }
+                let hidden = Rect::from_min_max(pos2(400.0, 120.0), pos2(500.0, 350.0));
+                assert!(fade_control_position(fade, 100.0, 500.0, body, hidden).is_none());
+                let tiny = Rect::from_min_max(pos2(100.0, 120.0), pos2(500.0, 128.0));
+                assert!(fade_control_position(fade, 100.0, 500.0, body, tiny).is_none());
+            }
+        }
     }
 
     #[test]

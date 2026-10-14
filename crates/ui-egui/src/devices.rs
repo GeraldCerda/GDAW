@@ -221,7 +221,7 @@ pub fn browser(app: &mut SoundApp, ui: &mut Ui) {
         return;
     }
     poll_plugins(app);
-    if !app.browser.plugins_loaded && app.browser.plugin_scan.is_none() {
+    if !app.browser.plugins_loaded && app.browser.plugin_scan.is_none() && app.player.is_some() {
         scan_plugins(app, false);
     }
     ui.horizontal_wrapped(|ui| {
