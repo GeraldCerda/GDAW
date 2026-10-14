@@ -1305,7 +1305,7 @@ fn read_bundle(bytes: &[u8]) -> Result<(String, std::collections::HashMap<String
 /// The record-enabled audio tracks, each with the input channels it records (those its input
 /// route names, "In 3" → 2, wrapped to the device's `input_channels`) and a new take file
 /// `<track>_<NN>.wav` in the `Audio Files` of the session's folder (`unsaved_dir` until it is saved).
-pub fn plan_takes(e: &Engine, unsaved_dir: &Path, input_channels: usize) -> Vec<(TrackId, Vec<usize>, PathBuf)> {
+pub fn plan_takes(e: &Engine, unsaved_dir: &Path, _input_channels: usize) -> Vec<(TrackId, Vec<usize>, PathBuf)> {
     let dir = e.path.as_deref().and_then(|p| Path::new(p).parent()).unwrap_or(unsaved_dir);
     let s = e.session();
     let take_no = s.sources.len() + 1;
