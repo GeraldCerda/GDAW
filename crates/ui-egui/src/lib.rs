@@ -21,6 +21,8 @@ pub mod ops_windows;
 pub mod palette;
 pub mod panels;
 pub mod plugin_browser;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod plugin_scan;
 mod recent;
 pub mod recovery;
 pub mod sampler_window;

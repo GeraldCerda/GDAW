@@ -201,10 +201,14 @@ fn app_icon() -> Option<egui::IconData> {
 }
 
 fn main() -> eframe::Result {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(code) = soundcraft_ui_egui::plugin_scan::run_helper(&args) {
+        std::process::exit(code);
+    }
+    soundcraft_ui_egui::plugin_scan::install();
     // First, so every start-up record (and the engine's panic hook, installed with the first
     // Engine) is captured; see `logging`.
     let logger = logging::install();
-    let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("SoundCraft {}", env!("CARGO_PKG_VERSION"));
         return Ok(());

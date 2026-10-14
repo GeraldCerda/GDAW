@@ -78,7 +78,7 @@ pub fn parse_id(id: &str) -> Option<[u8; 16]> {
 }
 
 /// One plugin found by a scan.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Vst3Descriptor {
     /// SoundCraft id: `vst3:<class_id>`.
     pub id: String,
@@ -328,4 +328,11 @@ mod tests {
         assert!(e.to_string().contains("not a VST3 plugin"), "{e}");
         let _ = std::fs::remove_dir_all(&d);
     }
+}
+
+pub fn set_bundle_scanner(scanner: fn(&Path) -> Result<Vec<Vst3Descriptor>, Vst3Error>) {
+    #[cfg(not(target_arch = "wasm32"))]
+    registry::set_bundle_scanner(scanner);
+    #[cfg(target_arch = "wasm32")]
+    let _ = scanner;
 }

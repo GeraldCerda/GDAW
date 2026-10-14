@@ -54,7 +54,7 @@ pub fn parse_id(id: &str) -> Option<&str> {
 }
 
 /// One plugin found by a scan.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ClapDescriptor {
     /// SoundCraft id: `clap:<plugin_id>`.
     pub id: String,
@@ -239,4 +239,11 @@ mod tests {
         assert!(instantiate("clap:does.not.exist").is_err());
         let _ = std::fs::remove_dir_all(&d);
     }
+}
+
+pub fn set_bundle_scanner(scanner: fn(&Path) -> Result<Vec<ClapDescriptor>, ClapError>) {
+    #[cfg(not(target_arch = "wasm32"))]
+    registry::set_bundle_scanner(scanner);
+    #[cfg(target_arch = "wasm32")]
+    let _ = scanner;
 }

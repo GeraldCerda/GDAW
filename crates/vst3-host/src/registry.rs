@@ -23,6 +23,14 @@ struct Registry {
     failed: HashSet<String>,
 }
 
+type BundleScanner = fn(&Path) -> Result<Vec<Vst3Descriptor>, Vst3Error>;
+
+static BUNDLE_SCANNER: OnceLock<BundleScanner> = OnceLock::new();
+
+pub fn set_bundle_scanner(scanner: BundleScanner) {
+    let _ = BUNDLE_SCANNER.set(scanner);
+}
+
 fn registry() -> &'static Mutex<Registry> {
     static R: OnceLock<Mutex<Registry>> = OnceLock::new();
     R.get_or_init(|| Mutex::new(Registry::default()))
@@ -58,7 +66,8 @@ pub fn load_bundle(path: &Path) -> Result<Vec<Vst3Descriptor>, Vst3Error> {
 pub fn scan_paths(dirs: &[PathBuf]) -> Vec<Vst3Descriptor> {
     let mut out: Vec<Vst3Descriptor> = Vec::new();
     for path in paths::find_bundles(dirs) {
-        match load_bundle(&path) {
+        let scanner = BUNDLE_SCANNER.get().copied().unwrap_or(load_bundle);
+        match scanner(&path) {
             Ok(ds) => {
                 for d in ds {
                     if !out.iter().any(|o| o.id == d.id) {
