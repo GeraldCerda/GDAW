@@ -16,6 +16,7 @@ pub mod icons;
 pub mod menus;
 pub mod midi_editor;
 pub mod mix_window;
+pub mod devices;
 pub mod ops_windows;
 pub mod palette;
 pub mod panels;
@@ -62,6 +63,8 @@ pub struct UiState {
     pub mix_docking: docking::Workspace,
     pub window: MainWindow,
     pub show_tracks_list: bool,
+    pub show_browser: bool,
+    pub show_devices: bool,
     pub show_clip_list: bool,
     pub show_transport: bool,
     pub show_memory_locations: bool,
@@ -135,6 +138,8 @@ impl Default for UiState {
             mix_docking: docking::mix_default(),
             window: MainWindow::Edit,
             show_tracks_list: true,
+            show_browser: true,
+            show_devices: true,
             show_clip_list: true,
             show_transport: false,
             show_memory_locations: false,
@@ -147,7 +152,7 @@ impl Default for UiState {
             show_universe: false,
             narrow_mix: false,
             mix_views: vec!["inserts_ae".into(), "sends_ae".into(), "io".into(), "color".into()],
-            edit_views: vec!["color".into()],
+            edit_views: vec!["color".into(), "io".into(), "instruments".into()],
             track_tint: 0.5,
             plugin_windows: Vec::new(),
             send_window: None,
@@ -297,6 +302,8 @@ pub struct SoundApp {
     pub synthetic: Vec<egui::Event>,
     /// Where a dropped audio file loads into a track's sampler (last frame's rects).
     pub sample_drop_targets: Vec<(egui::Rect, TrackId)>,
+    pub pad_drop_targets: Vec<(egui::Rect, TrackId, u8)>,
+    pub browser: devices::BrowserState,
     sample_reads: Vec<sampler_window::SampleRead>,
     synthetic_grace: u32,
     control_rx: Option<Receiver<ControlRequest>>,
@@ -380,6 +387,8 @@ impl SoundApp {
             focus_mix: false,
             synthetic: Vec::new(),
             sample_drop_targets: Vec::new(),
+            pad_drop_targets: Vec::new(),
+            browser: devices::BrowserState::default(),
             sample_reads: Vec::new(),
             synthetic_grace: 0,
             control_rx: None,
@@ -774,6 +783,7 @@ impl SoundApp {
     /// Whether the meters are live: while playing, and while armed or input-monitored tracks are heard.
     fn meters_live(&self) -> bool {
         self.engine.transport.playing
+            || self.browser.preview_started.is_some_and(|started| started.elapsed().as_secs_f32() < 2.0)
             || (self.recorder.is_some() && self.engine.session().tracks.iter().any(|t| t.mixer.input_monitor || t.mixer.record_arm))
     }
 
@@ -1060,6 +1070,13 @@ impl SoundApp {
                 }
                 TransportRequest::Scrub(at) => self.engine.transport.position = at,
                 TransportRequest::AllNotesOff => {}
+                TransportRequest::Audition(track, note) => {
+                    if let Some(player) = &self.player {
+                        player.audition(track, note);
+                    } else {
+                        self.ui.status = "No audio output device is available for audition".into();
+                    }
+                }
             }
         }
         let mut input_meters: std::collections::HashMap<_, _> = self.recorder.as_ref().map_or_else(std::collections::HashMap::new, |recorder| {
@@ -1238,6 +1255,7 @@ impl SoundApp {
         }
         shortcuts::handle(self, &ctx);
         self.sample_drop_targets.clear();
+        self.pad_drop_targets.clear();
         if !self.native_menu_bar {
             menus::menu_bar(self, ui);
         }

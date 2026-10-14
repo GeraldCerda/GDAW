@@ -109,6 +109,12 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
     egui::Panel::top("edit_toolbar").exact_size(toolbar::HEIGHT).frame(egui::Frame::NONE.fill(t.toolbar_bg)).show(ui, |ui| toolbar::show(app, ui));
     egui::Panel::bottom("edit_status").exact_size(22.0).frame(egui::Frame::NONE.fill(t.toolbar_bg)).show(ui, |ui| status_bar(app, ui));
     egui::Panel::bottom("lower_dock_tabs").exact_size(22.0).frame(egui::Frame::NONE.fill(t.panel_bg2)).show(ui, |ui| dock_tabs(app, ui));
+    if app.ui.show_browser {
+        egui::Panel::left("device_browser").default_size(260.0).resizable(true).frame(egui::Frame::NONE.fill(t.panel_bg)).show(ui, |ui| crate::devices::browser(app, ui));
+    }
+    if app.ui.show_devices {
+        egui::Panel::bottom("track_devices").default_size(250.0).resizable(true).frame(egui::Frame::NONE.fill(t.panel_bg2)).show(ui, |ui| crate::devices::chain(app, ui));
+    }
     if app.ui.show_universe {
         egui::Panel::top("universe").exact_size(64.0).frame(egui::Frame::NONE.fill(Tokens::current().universe_bg)).show(ui, |ui| universe(app, ui));
     }
@@ -159,6 +165,9 @@ fn dock_tabs(app: &mut SoundApp, ui: &mut Ui) {
     let r = ui.max_rect();
     let mut x = r.min.x + 10.0;
     for (label, on, id) in [
+        ("BROWSER", app.ui.show_browser, "window.browser"),
+        ("DEVICES", app.ui.show_devices, "window.devices"),
+        ("MIXER", app.ui.mix_separate, "window.mix"),
         ("MIDI EDITOR", app.ui.show_midi_editor, "window.midi_editor"),
         ("MEMORY LOCATIONS", app.ui.show_memory_locations, "window.memory_locations"),
         ("UNDO HISTORY", app.ui.show_undo_history, "window.undo_history"),

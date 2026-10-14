@@ -55,9 +55,19 @@ fn search_chord(m: Modifiers, mac: bool) -> bool {
 }
 
 pub fn handle(app: &mut SoundApp, ctx: &egui::Context) {
-    // Cmd+= and Cmd+0 are Mix/Edit and Quantize to Grid, not egui's built-in interface zoom.
     ctx.options_mut(|o| o.zoom_with_keyboard = false);
-    if ctx.egui_wants_keyboard_input() || app.dialogs.open.is_some() {
+    if app.dialogs.open.is_some() {
+        return;
+    }
+    let mac = ctx.os() == egui::os::OperatingSystem::Mac;
+    let mixer_key = |event: &egui::Event| matches!(event,
+        egui::Event::Key { key: Key::Equals | Key::Plus, pressed: true, repeat: false, modifiers, .. }
+        if modifiers.command && !modifiers.alt && !(mac && modifiers.ctrl));
+    if ctx.input(|input| input.events.iter().any(mixer_key)) {
+        let _ = app.run("window.mix", json!({}));
+        ctx.input_mut(|input| input.events.retain(|event| !mixer_key(event)));
+    }
+    if ctx.egui_wants_keyboard_input() {
         return;
     }
     let events: Vec<(Key, Modifiers)> = ctx.input(|i| {
@@ -70,7 +80,6 @@ pub fn handle(app: &mut SoundApp, ctx: &egui::Context) {
             .collect()
     });
     // Cmd and Ctrl are separate keys only on macOS (asked at runtime so the web build in a Mac browser agrees).
-    let mac = ctx.os() == egui::os::OperatingSystem::Mac;
     for (key, mods) in events {
         if fixed(app, key, mods, mac) {
             continue;
@@ -114,7 +123,7 @@ fn fixed(app: &mut SoundApp, key: Key, m: Modifiers, mac: bool) -> bool {
             let _ = app.run("window.search", json!({}));
             true
         }
-        Key::Equals if m.command && !(mac && m.ctrl) => {
+        Key::Equals | Key::Plus if m.command && !m.alt && !(mac && m.ctrl) => {
             let _ = app.run("window.toggle_mix_edit", json!({}));
             true
         }

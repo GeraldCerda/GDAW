@@ -49,6 +49,11 @@ fn clear(e: &mut Engine, p: &Value) -> Result<Value> {
         let plural = if n == 1 { "" } else { "s" };
         return Err(bad(CLEAR, format!("`{}` is used by {n} clip{plural} on the timeline; pass `with_clips: true` to remove them too", f.name)));
     }
+    if s.tracks.iter().filter_map(|track| track.instrument.as_ref()).any(|insert| {
+        insert.sample.is_some_and(|source| sources.contains(&source)) || insert.pad_samples.values().any(|source| sources.contains(source))
+    }) {
+        return Err(bad(CLEAR, "an audio file is loaded in a sampler or drum pad; clear that sample assignment first"));
+    }
     let gone: BTreeSet<ClipId> = clips.iter().copied().chain(sources.iter().flat_map(|f| s.clips_using(*f).map(|c| c.id))).collect();
     let s = e.session_mut();
     for pl in s.tracks.iter_mut().flat_map(|t| t.playlists.iter_mut()) {

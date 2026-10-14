@@ -229,6 +229,9 @@ pub trait Plugin: Send {
     fn set_sample(&mut self, _sample: Option<Arc<dyn SampleSource>>) -> bool {
         false
     }
+    fn set_pad_sample(&mut self, _note: u8, _sample: Option<Arc<dyn SampleSource>>) -> bool {
+        false
+    }
     /// The plugin's complete internal state as an opaque blob (third-party plugins), as its
     /// [`Plugin::state_reader`] reads it. `None` when the plugin has no state beyond its
     /// parameters (built-ins) or the plugin refused. May allocate: never call it in steady-state

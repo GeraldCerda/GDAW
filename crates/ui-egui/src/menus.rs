@@ -9,6 +9,8 @@ use soundcraft_engine::catalog;
 pub const UI_COMMANDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("ui.dock", "Arrange Panel", "", None),
     ("ui.dock.reset", "Reset Panel Layout", "Window > Reset Panel Layout", None),
+    ("window.browser", "Browser", "", None),
+    ("window.devices", "Track Devices", "", None),
     ("window.mix", "Mix", "Window > Mix", Some("Cmd+=")),
     ("window.edit", "Edit", "Window > Edit", Some("Cmd+=")),
     ("window.toggle_mix_edit", "Toggle Mix/Edit", "", Some("Cmd+=")),
@@ -336,7 +338,7 @@ fn checked_state(app: &SoundApp, path: &str, id: Option<&str>) -> bool {
         Some("options.pre_fader_metering") => e.pre_fader_metering,
         Some("view.ruler") => path.rsplit(" > ").next().map(ruler_id).is_some_and(|r| e.rulers.iter().any(|x| x == r)),
         Some("view.main_counter") => path.rsplit(" > ").next().map(ruler_id).is_some_and(|r| e.main_counter.id() == r),
-        Some("window.mix") => app.ui.window == MainWindow::Mix,
+        Some("window.mix") => app.ui.mix_separate || app.ui.window == MainWindow::Mix,
         Some("window.edit") => app.ui.window == MainWindow::Edit,
         Some("window.track_list") => app.ui.show_tracks_list,
         Some("window.clip_list_view") | Some("window.clip_list") => app.ui.show_clip_list,
@@ -492,9 +494,10 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
     };
     let r = match id {
         "window.mix" => {
-            app.ui.window = MainWindow::Mix;
-            app.focus_mix = app.ui.mix_separate;
-            json!({"window": "mix"})
+            app.ui.mix_separate = true;
+            app.ui.window = MainWindow::Edit;
+            app.focus_mix = true;
+            json!({"window": "mix", "separate": true})
         }
         "window.mix_separate" => {
             let v = toggle(&mut app.ui.mix_separate);
@@ -506,14 +509,13 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
             json!({"window": "edit"})
         }
         "window.toggle_mix_edit" => {
-            if app.ui.mix_separate {
-                // Both are on screen: bring the Mix window forward instead.
-                app.focus_mix = true;
-            } else {
-                app.ui.window = if app.ui.window == MainWindow::Edit { MainWindow::Mix } else { MainWindow::Edit };
-            }
-            json!({"window": app.ui.window})
+            app.ui.mix_separate = true;
+            app.ui.window = MainWindow::Edit;
+            app.focus_mix = true;
+            json!({"window": "mix", "separate": true})
         }
+        "window.browser" => toggle(&mut app.ui.show_browser),
+        "window.devices" => toggle(&mut app.ui.show_devices),
         "window.transport" => toggle(&mut app.ui.show_transport),
         "window.big_counter" => toggle(&mut app.ui.show_big_counter),
         "window.memory_locations" => toggle(&mut app.ui.show_memory_locations),

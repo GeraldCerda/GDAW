@@ -65,6 +65,7 @@ enum Cmd {
     OldSessions(SyncSender<Arc<Session>>),
     Input(Arc<record::InputRing>),
     Recording(bool),
+    Audition(TrackId, u8),
     Play {
         from: Samples,
         end: Option<Samples>,
@@ -168,6 +169,7 @@ struct AudioState {
     device_rate: f64,
     input: Option<Arc<record::InputRing>>,
     recording: bool,
+    audition_frames: usize,
     /// Retired plugin instances go back to the UI thread to be dropped there.
     garbage: Sender<Vec<Box<dyn Plugin>>>,
     old_sessions: Option<SyncSender<Arc<Session>>>,
@@ -202,6 +204,7 @@ impl AudioState {
             device_rate,
             input: None,
             recording: false,
+            audition_frames: 0,
         }
     }
 
@@ -211,6 +214,14 @@ impl AudioState {
             match c {
                 Cmd::Input(r) => self.input = Some(r),
                 Cmd::Recording(r) => self.recording = r,
+                Cmd::Audition(track, note) => {
+                    self.mix.audition(&self.session, track, note);
+                    self.audition_frames = (self.device_rate.max(1.0) * 2.0) as usize;
+                    if !self.playing {
+                        self.pending_len = 0;
+                        self.read = 0.0;
+                    }
+                }
                 Cmd::Session(s, instances) => {
                     changed = true;
                     if (s.sample_rate.as_f64() - self.session.sample_rate.as_f64()).abs() > 0.5 {
@@ -242,6 +253,7 @@ impl AudioState {
                     self.mix.reset();
                 }
                 Cmd::Stop => {
+                    self.audition_frames = 0;
                     self.playing = false;
                     self.end = None;
                     self.looped = None;
@@ -332,7 +344,7 @@ impl AudioState {
         self.drain();
         let channels = channels.max(1);
         let monitoring = self.input.is_some() && self.session.tracks.iter().any(|t| t.mixer.input_monitor || t.mixer.record_arm);
-        if !self.playing && !monitoring {
+        if !self.playing && !monitoring && self.audition_frames == 0 {
             out.iter_mut().for_each(|x| *x = 0.0);
             if let Ok(mut m) = self.shared.meters.try_lock() {
                 m.main = StripMeter::default();
@@ -347,7 +359,7 @@ impl AudioState {
         for frame in out.chunks_mut(channels) {
             while self.read >= self.pending_len as f64 {
                 self.read -= self.pending_len as f64;
-                if !self.playing && !monitoring {
+                if !self.playing && !monitoring && self.audition_frames == 0 {
                     break;
                 }
                 self.render_next(quantum);
@@ -357,7 +369,7 @@ impl AudioState {
             }
             let i0 = self.read.floor() as usize;
             let fr = (self.read - i0 as f64) as f32;
-            let sounding = self.playing || monitoring;
+            let sounding = self.playing || monitoring || self.audition_frames > 0;
             let nch = self.pending.len();
             let sample = |c: usize| {
                 let ch = self.pending.get(c);
@@ -389,6 +401,16 @@ impl AudioState {
                 }
             }
             self.read += step;
+            if self.audition_frames > 0 {
+                self.audition_frames -= 1;
+                if self.audition_frames == 0 {
+                    if self.playing {
+                        self.mix.audition_track = None;
+                    } else {
+                        self.mix.end_audition();
+                    }
+                }
+            }
         }
     }
 }
@@ -736,6 +758,10 @@ impl Player {
     /// Feed live input (from a `record::Recorder`) into the mix for input monitoring.
     pub fn set_input(&self, ring: Arc<record::InputRing>) {
         let _ = self.tx.send(Cmd::Input(ring));
+    }
+
+    pub fn audition(&self, track: TrackId, note: u8) {
+        let _ = self.tx.send(Cmd::Audition(track, note));
     }
 
     pub fn set_recording(&self, on: bool) {

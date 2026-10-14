@@ -1,5 +1,6 @@
 //! The built-in plugins and their registry.
 
+pub mod drum_rack;
 pub mod drums;
 pub mod dynamics;
 pub mod eq;
@@ -42,6 +43,7 @@ pub(crate) static REGISTRY: &[&PluginInfo] = &[
     &utility::DITHER_INFO,
     &synth::SYNTH_INFO,
     &drums::DRUM_INFO,
+    &drum_rack::DRUM_RACK_INFO,
     &sampler::SAMPLER_INFO,
 ];
 
@@ -74,6 +76,7 @@ pub(crate) fn instantiate(id: &str) -> Option<Box<dyn Plugin>> {
         "dither" => Box::new(utility::Dither::new()),
         "subtractive_synth" => Box::new(synth::SubtractiveSynth::new()),
         "drum_synth" => Box::new(drums::DrumSynth::new()),
+        "drum_rack" => Box::new(drum_rack::DrumRack::new()),
         "sampler" => Box::new(sampler::Sampler::new()),
         _ => return None,
     })

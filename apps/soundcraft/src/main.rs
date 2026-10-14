@@ -76,13 +76,13 @@ impl eframe::App for App {
         // title carries them; elsewhere the egui menu bar already does.
         let title = if self.0.native_menu_bar {
             format!(
-                "{}{} — SoundCraft — {}",
+                "{}{} — G — {}",
                 self.0.engine.session().name,
                 if self.0.engine.is_dirty() { " *" } else { "" },
                 if self.0.ui.window == soundcraft_ui_egui::MainWindow::Edit { "Edit" } else { "Mix" }
             )
         } else {
-            format!("{} — SoundCraft", self.0.engine.session().name)
+            format!("{} — G", self.0.engine.session().name)
         };
         set_title(ctx, title);
     }
@@ -196,10 +196,7 @@ fn services() -> Services {
 /// The window, Dock, taskbar and Alt-Tab icon. macOS gets Apple's icon grid (transparent margin);
 /// elsewhere the full tile. Regenerate with `packaging/icons.sh`.
 fn app_icon() -> Option<egui::IconData> {
-    #[cfg(target_os = "macos")]
-    let png: &[u8] = include_bytes!("../../../assets/app-icon/soundcraft-macos-512.png");
-    #[cfg(not(target_os = "macos"))]
-    let png: &[u8] = include_bytes!("../../../assets/app-icon/hicolor/256x256/apps/ai.storyteller.soundcraft.png");
+    let png: &[u8] = include_bytes!("../../../Purple G icon with transparent background.png");
     eframe::icon_data::from_png_bytes(png).map_err(|e| log::warn!("app icon: {e}")).ok()
 }
 
@@ -245,11 +242,15 @@ fn main() -> eframe::Result {
         }
     }
 
-    let engine = if demo { soundcraft_engine::demo::demo_engine() } else { Engine::default() };
+    let engine = if demo {
+        soundcraft_engine::demo::demo_engine()
+    } else {
+        Engine::new(soundcraft_engine::starter_session("Untitled", soundcraft_engine::model::time::SampleRate::HZ_48000))
+    };
     let prefs = load_prefs().unwrap_or_default();
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("SoundCraft")
+            .with_title("G")
             .with_inner_size(sane_window_size(prefs.window_size))
             .with_maximized(prefs.window_maximized)
             .with_min_inner_size([960.0, 600.0])
@@ -264,7 +265,7 @@ fn main() -> eframe::Result {
     #[cfg(target_os = "windows")]
     graphics::configure(&mut options, eframe::wgpu::Backends::from_env(), eframe::wgpu::Dx12Compiler::from_env());
     eframe::run_native(
-        "SoundCraft",
+        "G",
         options,
         Box::new(move |cc| {
             let player =

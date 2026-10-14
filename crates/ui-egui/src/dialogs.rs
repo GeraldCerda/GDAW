@@ -351,7 +351,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                     if buttons(ui, "Create", enter) {
                         action = Some((
                             "session.new".into(),
-                            json!({"name": name, "sample_rate": sample_rate, "template": if *demo { "demo" } else { "blank" }}),
+                            json!({"name": name, "sample_rate": sample_rate, "template": if *demo { "demo" } else { "gdaw" }}),
                         ));
                     }
                 }

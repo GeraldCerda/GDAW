@@ -90,6 +90,21 @@ impl SoundApp {
         if files.is_empty() {
             return files;
         }
+        if let Some((_, track, note)) = pos.and_then(|point| self.pad_drop_targets.iter().rev().find(|(rect, _, _)| rect.contains(point))).copied() {
+            let mut rest = Vec::new();
+            let mut claimed = false;
+            for file in files {
+                if !claimed && file.path().is_absolute() && is_audio_name(&file.path().to_string_lossy()) {
+                    let path = file.path().to_string_lossy().into_owned();
+                    let result = self.run("mix.drum_pad_load", json!({"track": track.0, "note": note, "path": path}));
+                    self.ui.status = result.map_or_else(|error| error, |_| "Sample loaded into Drum Rack".into());
+                    claimed = true;
+                } else {
+                    rest.push(file);
+                }
+            }
+            return rest;
+        }
         let Some(track) = self.drop_track(pos) else { return files };
         let mut rest = Vec::new();
         let mut claimed = false;

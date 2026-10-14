@@ -224,6 +224,7 @@ struct Strip {
     instrument: Option<PluginSlot>,
     /// The pool audio handed to the instrument with `set_sample` (sample-playing instruments).
     sample: Option<Arc<SourceAudio>>,
+    pad_samples: [Option<Arc<SourceAudio>>; 16],
     /// MIDI notes currently sounding on the instrument (pitch), for note-offs at stops/seek.
     held: Vec<u8>,
     /// The instrument's next block starts somewhere new: send it the controllers in effect there.
@@ -309,6 +310,7 @@ impl Strip {
             plugins: Vec::new(),
             instrument: None,
             sample: None,
+            pad_samples: std::array::from_fn(|_| None),
             held: Vec::new(),
             chase: true,
             muted: false,
@@ -357,6 +359,7 @@ pub struct MixEngine {
     pub input: Vec<Vec<f32>>,
     /// Transport stopped: only monitored inputs sound (no clips).
     pub monitor_only: bool,
+    pub audition_track: Option<TrackId>,
     /// Recording: record-armed tracks hear their input (auto input).
     pub recording: bool,
     /// Mix the metronome (Options > Click) into the output. Playback turns this on; offline renders
@@ -437,6 +440,7 @@ impl MixEngine {
             aux_latency: 0,
             input: Vec::new(),
             monitor_only: false,
+            audition_track: None,
             recording: false,
             metronome: false,
             external: false,
@@ -500,6 +504,7 @@ impl MixEngine {
 
     /// Reset all plugin state (on stop / seek).
     pub fn reset(&mut self) {
+        self.audition_track = None;
         for s in self.strips.values_mut() {
             for p in s.plugins.iter_mut().flatten() {
                 p.plugin.reset();
@@ -573,8 +578,10 @@ impl MixEngine {
                 cx.retire(old);
                 strip.instrument = want.and_then(|i| cx.make(t.id, INSTRUMENT_SLOT, i, ich));
                 strip.sample = None;
+                strip.pad_samples.fill(None);
             }
             sync_sample(strip, want, s);
+            sync_pad_samples(strip, want, s);
         }
         // Instances nobody claimed (the session changed again before they arrived).
         let leftovers: Vec<(TrackId, usize)> = cx.adopt.keys().copied().collect();
@@ -610,9 +617,25 @@ impl MixEngine {
     }
 
     /// Render `frames` (≤ max_block) samples starting at `pos` into `out` (≥ 2 channels).
+    pub fn audition(&mut self, session: &Session, track: TrackId, note: u8) {
+        self.ensure_synced(session);
+        if let Some(slot) = self.strips.get_mut(&track).and_then(|strip| strip.instrument.as_mut()) {
+            slot.plugin.note_on(0, note, 127);
+            self.audition_track = Some(track);
+        }
+    }
+
+    pub fn end_audition(&mut self) {
+        if let Some(track) = self.audition_track.take()
+            && let Some(slot) = self.strips.get_mut(&track).and_then(|strip| strip.instrument.as_mut())
+        {
+            slot.plugin.reset();
+        }
+    }
+
     pub fn render(&mut self, s: &Session, pos: Samples, frames: usize, out: &mut [Vec<f32>]) {
         let frames = frames.min(self.max_block);
-        if pos != self.last_end {
+        if pos != self.last_end && !self.monitor_only {
             // Seek: silence held notes and ringing plugins.
             for st in self.strips.values_mut() {
                 if let Some(i) = &mut st.instrument {
@@ -651,7 +674,7 @@ impl MixEngine {
             }
         }
         let busses = std::mem::take(&mut self.busses);
-        let live_in = LiveInput { input: &self.input, monitor_only: self.monitor_only, recording: self.recording };
+        let live_in = LiveInput { input: &self.input, monitor_only: self.monitor_only, recording: self.recording, audition_track: self.audition_track };
         run_strips(&mut work, |(i, st)| {
             if let Some(t) = s.tracks.get(*i) {
                 process_strip(s, t, st, &busses, &live_in, pos, frames, any_solo);
@@ -732,7 +755,7 @@ impl MixEngine {
             if st.scratch.len() < self.max_block {
                 st.scratch.resize(self.max_block, 0.0);
             }
-            let live_in = LiveInput { input: &self.input, monitor_only: self.monitor_only, recording: self.recording };
+            let live_in = LiveInput { input: &self.input, monitor_only: self.monitor_only, recording: self.recording, audition_track: self.audition_track };
             process_strip(s, t, &mut st, &self.busses, &live_in, pos, frames, any_solo);
             let ch = st.buf.len();
             st.align.set(if pdc { lmax_a.saturating_sub(st.latency) } else { 0 }, ch);
@@ -892,6 +915,7 @@ struct LiveInput<'a> {
     input: &'a [Vec<f32>],
     monitor_only: bool,
     recording: bool,
+    audition_track: Option<TrackId>,
 }
 
 fn process_strip(
@@ -924,7 +948,7 @@ fn process_strip(
             }
         }
         TrackKind::Audio if live.monitor_only => {}
-        TrackKind::Instrument | TrackKind::Midi if live.monitor_only => {}
+        TrackKind::Instrument | TrackKind::Midi if live.monitor_only && live.audition_track != Some(t.id) => {}
         TrackKind::Audio => {
             let block = Range { start: pos, end: pos.saturating_add(frames as i64) };
             for clip in t.clips() {
@@ -986,10 +1010,12 @@ fn process_strip(
                     apply_params(inst, ins, t, INSTRUMENT_SLOT, pos);
                 }
                 inst.plugin.set_transport(&transport);
-                if std::mem::take(&mut strip.chase) {
-                    chase_controllers(s, t, pos, inst);
+                if !live.monitor_only {
+                    if std::mem::take(&mut strip.chase) {
+                        chase_controllers(s, t, pos, inst);
+                    }
+                    schedule_notes(s, t, pos, frames, inst, &mut strip.held);
                 }
-                schedule_notes(s, t, pos, frames, inst, &mut strip.held);
                 if strip.buf.len() >= 2 {
                     inst.plugin.process(&mut strip.buf, frames);
                 } else if let Some(c0) = strip.buf.first_mut() {
@@ -1220,6 +1246,13 @@ fn structure_fingerprint(s: &Session) -> usize {
             snd.target.hash(&mut h);
         }
         t.instrument.as_ref().map(|x| x.plugin.as_str()).hash(&mut h);
+        if let Some(instrument) = &t.instrument {
+            for (note, source) in &instrument.pad_samples {
+                note.hash(&mut h);
+                source.hash(&mut h);
+                s.pool.get(*source).map(|audio| Arc::as_ptr(audio) as usize).hash(&mut h);
+            }
+        }
         let sample = t.instrument.as_ref().and_then(|x| x.sample);
         sample.hash(&mut h);
         // Which decoded audio it is, so new audio under the same id (another session) re-syncs.
@@ -1613,6 +1646,24 @@ impl SampleSource for PoolSample {
 
 /// Hands a strip's instrument the audio of its insert's sample source when it changed (a new
 /// sample, a cleared one, or a new instance). Missing media plays nothing.
+fn sync_pad_samples(strip: &mut Strip, want: Option<&soundcraft_model::Insert>, session: &Session) {
+    let Some(instrument) = strip.instrument.as_mut() else { return };
+    for (index, previous) in strip.pad_samples.iter_mut().enumerate() {
+        let note = (36 + index) as u8;
+        let audio = want.and_then(|insert| insert.pad_samples.get(&note)).and_then(|source| session.pool.get(*source));
+        let same = match (previous.as_ref(), audio) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            let shared = audio.map(|audio| Arc::new(PoolSample(Arc::clone(audio))) as Arc<dyn SampleSource>);
+            instrument.plugin.set_pad_sample(note, shared);
+            *previous = audio.cloned();
+        }
+    }
+}
+
 fn sync_sample(strip: &mut Strip, want: Option<&soundcraft_model::Insert>, s: &Session) {
     let audio = want.and_then(|i| i.sample).and_then(|id| s.pool.get(id));
     let same = match (strip.sample.as_ref(), audio) {

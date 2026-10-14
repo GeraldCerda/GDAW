@@ -68,6 +68,7 @@ pub enum TransportRequest {
     HalfSpeed,
     Scrub(Samples),
     AllNotesOff,
+    Audition(TrackId, u8),
 }
 
 /// Snapshot of the transport reported back by the host (playback position etc.).
@@ -139,6 +140,23 @@ pub struct Engine {
     /// The edit selection (range, tracks) before the last change, for Restore Last Selection.
     /// Kept out of the document so selecting never marks the session modified.
     pub last_selection: Option<(soundcraft_time::Range, Vec<TrackId>)>,
+}
+
+pub fn starter_session(name: impl Into<String>, sample_rate: soundcraft_time::SampleRate) -> Session {
+    let mut session = Session::new(name, sample_rate);
+    let midi = session.add_track(soundcraft_model::TrackKind::Instrument, soundcraft_model::ChannelFormat::Stereo, Some("MIDI 1"));
+    if let Some(track) = session.track_mut(midi) {
+        track.instrument = Some(soundcraft_model::Insert::new("drum_rack"));
+    }
+    let audio = session.add_track(soundcraft_model::TrackKind::Audio, soundcraft_model::ChannelFormat::Mono, Some("Audio 1"));
+    if let Some(track) = session.track_mut(audio) {
+        track.mixer.input = soundcraft_model::Route::Hardware("In 1".into());
+        track.mixer.output = soundcraft_model::Route::Main;
+    }
+    session.edit.selected_tracks = vec![midi];
+    session.edit.set_flag("edit_view.io", true);
+    session.edit.set_flag("edit_view.instruments", true);
+    session
 }
 
 impl Default for Engine {

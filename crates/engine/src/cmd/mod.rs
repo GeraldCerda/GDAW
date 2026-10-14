@@ -13,6 +13,7 @@ mod clip;
 mod clip_list;
 mod clip_more;
 mod edit;
+mod drum_rack;
 mod edit_more;
 mod event;
 mod event_more;
@@ -114,6 +115,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(clip::specs());
         v.extend(event::specs());
         v.extend(mix::specs());
+        v.extend(drum_rack::specs());
         v.extend(options::specs());
         v.extend(transport::specs());
         v.extend(tab::specs());

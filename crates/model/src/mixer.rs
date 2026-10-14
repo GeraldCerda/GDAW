@@ -459,6 +459,8 @@ pub struct Insert {
     /// The session audio source a sample-playing instrument (the built-in Sampler) plays.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sample: Option<SourceId>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pad_samples: BTreeMap<u8, SourceId>,
 }
 
 fn yes() -> bool {
@@ -475,6 +477,7 @@ impl Insert {
             preset: String::from("<factory default>"),
             state: None,
             sample: None,
+            pad_samples: BTreeMap::new(),
         }
     }
 

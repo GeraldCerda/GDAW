@@ -27,6 +27,7 @@ pub fn show_separate(app: &mut SoundApp, ctx: &egui::Context) {
     let builder = egui::ViewportBuilder::default().with_title(title).with_inner_size([1100.0, 720.0]).with_min_inner_size([480.0, 320.0]);
     ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("soundcraft.mix"), builder, |ui, _class| {
         ui.set_style(ui.ctx().global_style());
+        crate::shortcuts::handle(app, ui.ctx());
         if std::mem::take(&mut app.focus_mix) {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
         }
@@ -40,7 +41,7 @@ pub fn show_separate(app: &mut SoundApp, ctx: &egui::Context) {
 /// The separate Mix window was closed: Mix goes back into the main window.
 pub fn separate_closed(app: &mut SoundApp) {
     app.ui.mix_separate = false;
-    app.ui.window = crate::MainWindow::Mix;
+    app.ui.window = crate::MainWindow::Edit;
 }
 
 pub(crate) fn content(app: &mut SoundApp, ui: &mut Ui) {
