@@ -606,48 +606,123 @@ pub fn audio_device_command(app: &mut SoundApp, p: &serde_json::Value) -> Result
 }
 
 /// Setup › I/O: busses and output paths.
+pub(crate) fn hardware_input_channels(app: &SoundApp, ctx: &egui::Context) -> usize {
+    if let Some(recorder) = &app.recorder {
+        return recorder.channels;
+    }
+    let systems = audio_systems(ctx, false);
+    chosen_system(&systems, &app.ui.audio)
+        .and_then(|system| chosen_device(&system.inputs, app.ui.audio.input.as_deref()))
+        .map_or(0, |device| usize::from(device.max_channels))
+}
+
 pub fn io_setup(app: &mut SoundApp, ctx: &egui::Context) {
     let mut open = app.ui.show_io_setup;
-    win(ctx, &mut open, "I/O Setup", vec2(420.0, 300.0), |ui| {
-        ui.label(egui::RichText::new("Busses").strong());
-        let busses: Vec<(String, String)> = app.engine.session().busses.iter().map(|b| (b.name.clone(), b.format.label().to_string())).collect();
-        egui::Grid::new("busses").num_columns(3).striped(true).show(ui, |ui| {
-            for (name, fmt) in busses {
-                let key = egui::Id::new(("bus_name", name.clone()));
-                let mut edit: String = ui.ctx().memory(|m| m.data.get_temp(key)).unwrap_or_else(|| name.clone());
-                let r = ui.text_edit_singleline(&mut edit);
-                ui.ctx().memory_mut(|m| m.data.insert_temp(key, edit.clone()));
-                if r.lost_focus() && edit != name {
-                    let _ = app.run("setup.io", json!({"action": "rename_bus", "name": name, "new_name": edit}));
-                }
-                ui.label(fmt);
-                if ui.small_button("Delete").clicked() {
-                    let _ = app.run("setup.io", json!({"action": "delete_bus", "name": name}));
-                }
-                ui.end_row();
+    if !open {
+        return;
+    }
+    let count = hardware_input_channels(app, ctx);
+    let input_device = app.recorder.as_ref().map(|r| r.device_name.clone()).or_else(|| {
+        let systems = audio_systems(ctx, false);
+        chosen_system(&systems, &app.ui.audio)
+            .and_then(|system| chosen_device(&system.inputs, app.ui.audio.input.as_deref()))
+            .map(|device| device.name.clone())
+    });
+    win(ctx, &mut open, "I/O Setup", vec2(650.0, 520.0), |ui| {
+        ui.heading("Hardware Input Routing");
+        ui.horizontal(|ui| {
+            ui.label(input_device.as_deref().unwrap_or("No input device selected"));
+            ui.label(format!("({count} available channels)"));
+            if ui.button("Playback Engine…").clicked() {
+                app.ui.show_playback_engine = true;
             }
         });
+        ui.label("Assign the input channels recorded and monitored by each audio track.");
+        let tracks: Vec<_> = app.engine.session().tracks.iter()
+            .filter(|track| track.kind == soundcraft_model::TrackKind::Audio)
+            .map(|track| (track.id, track.name.clone(), track.channels(), crate::mix_window::input_name(app, track), track.mixer.record_arm, track.mixer.input_monitor))
+            .collect();
+        egui::ScrollArea::vertical().max_height(190.0).show(ui, |ui| {
+            egui::Grid::new("hardware_input_matrix").num_columns(4).spacing(vec2(12.0, 6.0)).striped(true).show(ui, |ui| {
+                ui.strong("Audio track");
+                ui.strong("Physical input");
+                ui.strong("Record");
+                ui.strong("Monitor");
+                ui.end_row();
+                for (id, name, width, assigned, armed, monitoring) in tracks {
+                    ui.label(&name);
+                    egui::ComboBox::from_id_salt(("hardware_input", id.0)).width(180.0).selected_text(&assigned).show_ui(ui, |ui| {
+                        if ui.selectable_label(assigned == "no output", "No input").clicked() {
+                            let _ = app.run("track.input", json!({"track": id.0, "input": "none"}));
+                        }
+                        if count >= width {
+                            for first in 1..=count - width + 1 {
+                                let label = if width == 1 { format!("In {first}") } else { format!("In {first}-{}", first + width - 1) };
+                                if ui.selectable_label(assigned == label, &label).clicked() {
+                                    let _ = app.run("track.input", json!({"track": id.0, "input": label}));
+                                }
+                            }
+                        } else {
+                            ui.label("No compatible hardware channels");
+                        }
+                    });
+                    let mut record = armed;
+                    if ui.checkbox(&mut record, "").on_hover_text("Record enable").changed() {
+                        let _ = app.run("mix.record_arm", json!({"track": id.0, "value": record}));
+                    }
+                    let mut monitor = monitoring;
+                    if ui.checkbox(&mut monitor, "").on_hover_text("Software input monitoring").changed() {
+                        let _ = app.run("mix.input_monitor", json!({"track": id.0, "value": monitor}));
+                    }
+                    ui.end_row();
+                }
+            });
+        });
+        ui.label("Software monitoring is optional. Disable it when monitoring directly through your interface to avoid hearing the input twice.");
+        ui.separator();
+        ui.label(egui::RichText::new("Busses").strong());
+        let busses: Vec<(String, String)> = app.engine.session().busses.iter().map(|bus| (bus.name.clone(), bus.format.label().to_string())).collect();
+        egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
+            egui::Grid::new("busses").num_columns(3).striped(true).show(ui, |ui| {
+                for (name, fmt) in busses {
+                    let key = egui::Id::new(("bus_name", name.clone()));
+                    let mut edit: String = ui.ctx().memory(|m| m.data.get_temp(key)).unwrap_or_else(|| name.clone());
+                    let response = ui.text_edit_singleline(&mut edit);
+                    ui.ctx().memory_mut(|m| m.data.insert_temp(key, edit.clone()));
+                    if response.lost_focus() && edit != name {
+                        let _ = app.run("setup.io", json!({"action": "rename_bus", "name": name, "new_name": edit}));
+                    }
+                    ui.label(fmt);
+                    if ui.small_button("Delete").clicked() {
+                        let _ = app.run("setup.io", json!({"action": "delete_bus", "name": name}));
+                    }
+                    ui.end_row();
+                }
+            });
+        });
         if ui.button("New Bus").clicked() {
-            let n = app.engine.session().busses.len() + 1;
+            let mut n = app.engine.session().busses.len() + 1;
+            while app.engine.session().bus_by_name(&format!("Bus {n}")).is_some() {
+                n += 1;
+            }
             let _ = app.run("mix.new_bus", json!({"name": format!("Bus {n}")}));
         }
         ui.separator();
         ui.label(egui::RichText::new("Outputs").strong());
-        // Main output format: stereo, or a surround format (the mix and master faders follow).
         let main = app.engine.session().main_format();
         ui.horizontal(|ui| {
             ui.label("Main output");
             egui::ComboBox::from_id_salt("main_output_format").selected_text(main.label()).show_ui(ui, |ui| {
-                for f in soundcraft_model::ChannelFormat::ALL.into_iter().filter(|f| (2..=16).contains(&f.channels())) {
-                    if ui.selectable_label(f == main, f.label()).clicked() && f != main {
-                        let _ = app.run("setup.main_format", json!({"format": f.label()}));
+                for format in soundcraft_model::ChannelFormat::ALL.into_iter().filter(|format| (2..=16).contains(&format.channels())) {
+                    if ui.selectable_label(format == main, format.label()).clicked() && format != main {
+                        let _ = app.run("setup.main_format", json!({"format": format.label()}));
                     }
                 }
             });
-            ui.label(egui::RichText::new(format!("{} ch", main.channels())).small());
+            ui.label(format!("{} ch", main.channels()));
         });
-        for o in app.engine.session().outputs.clone() {
-            ui.label(format!("{} — {} from channel {}", o.name, o.format.label(), o.first_channel + 1));
+        for output in app.engine.session().outputs.clone() {
+            ui.label(format!("{} — {} from channel {}", output.name, output.format.label(), output.first_channel + 1));
         }
     });
     app.ui.show_io_setup = open;
