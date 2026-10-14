@@ -596,6 +596,11 @@ impl SoundApp {
         if plan.is_empty() {
             return Err("no audio track is record-enabled".into());
         }
+        if let Some((track, inputs, _)) = plan.iter().find(|(_, inputs, _)| inputs.iter().any(|&channel| channel >= r.channels)) {
+            let name = self.engine.session().track(*track).map_or("Unknown", |t| t.name.as_str());
+            let channels = inputs.iter().map(|channel| (channel + 1).to_string()).collect::<Vec<_>>().join(", ");
+            return Err(format!("Cannot record {name}: assigned input channel(s) {channels}, but the selected interface has {} input channel(s). Reassign the input in Setup > I/O or the Mix window.", r.channels));
+        }
         let takes = plan
             .iter()
             .map(|(track, inputs, path)| soundcraft_engine::io::Take { track: *track, path: path.clone(), channels: inputs.len() })
