@@ -327,8 +327,10 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                                 ui.selectable_value(timebase, "ticks".to_string(), "Ticks");
                             },
                         );
-                        ui.label("Name:");
-                        ui.add(egui::TextEdit::singleline(name).desired_width(140.0));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Track name");
+                        ui.add(egui::TextEdit::singleline(name).desired_width(360.0).hint_text("Track name"));
                     });
                     if buttons(ui, "Create", enter) {
                         action =
