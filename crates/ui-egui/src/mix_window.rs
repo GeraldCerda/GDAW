@@ -1262,7 +1262,7 @@ fn route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, input: bool) {
             egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
                 for first in 1..=channels - width + 1 {
                     let route = if width == 1 { format!("In {first}") } else { format!("In {first}-{}", first + width - 1) };
-                    if ui.button(&route).clicked() {
+                    if ui.button(route.as_str()).clicked() {
                         let _ = app.run(cmd, json!({"track": id.0, key: route}));
                         ui.close();
                     }
