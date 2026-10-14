@@ -38,3 +38,21 @@ The screenshot confirms the light palette, left browser, bottom Drum Rack, named
 No clone, Cargo build, Rust test run, app launch, installer or binary was produced here, as requested. Selected source files were checked with a Rust syntax parser; this does not type-check Rust or validate egui behavior. Added/updated regressions must run on the tester's Mac. A follow-up tester-script commit pins this source revision and reuses the existing Cargo cache on the user's Mac.
 
 Reference: [Avid Edit Window overview](https://www.avid.com/pro-tools/user-guide/edit-window), including configurable inserts and I/O. Original code retained; no proprietary assets copied.
+
+## Follow-up: Drum Rack reliability
+
+Base reviewed: 0ccdd1ad7e4820c1cb8cd8f8422226041136622f.
+
+| Additional finding | Source correction | Regression coverage added |
+|---|---|---|
+| Library directory traversal runs in UI logic | Native discovery runs in a named worker with bounded traversal, cancellation checks and non-blocking result polling | Worker discovery, empty-file/symlink filtering |
+| A previous folder's scan can outlive a library change | Cancelling or changing the assignment drops its receiver and cancels its worker; stale results never enter the new catalog | Clearing and switching libraries preserve the session and reject old results |
+| Scan errors resemble an empty library | Root errors and worker failures have explicit status messages; the device area offers Rescan drum library | Empty-library integration fixture waits for completion |
+| One corrupt file rejects every random pad | Automatic/random kits opt into skip_invalid, report skipped files and fill consecutive available pads; explicit loads remain strict by default | Partial success, preserved assignments, one-step undo and all-invalid replacement rollback |
+| Previewing Rack A, Rack B, then Rack A can revive Rack A's suspended one-shot | Switching stopped preview tracks resets the previous instrument before triggering the next; playback instruments remain sounding during transport playback | Actual mix rendering tests for stopped and playing track switches |
+| Playback/seek retains an obsolete preview countdown | Play and Locate clear the preview timer; preview commands set stopped/playing mixer mode before triggering | Playback command-queue regression |
+| Replacing a sample leaves old MIDI events queued | Sampler clears pending events when its sample changes or is removed, in addition to stopping existing voices | DSP rendering regression for replacement and clearing |
+
+No additional audio-callback allocation or lock was introduced by these preview changes. Folder scanning is asynchronous in the native application; sample decoding/attachment still uses the existing engine command path on the UI thread. Web discovery retains its existing synchronous filesystem limitation.
+
+Rust syntax parsing is the available check here. The added Rust regressions have not been compiled or executed. Mic/interface checks, native window focus, full keypad shortcuts and per-pad effect chains remain outstanding. Stopped pad previews still have the existing two-second duration limit; complete long-sample audition remains unfinished.

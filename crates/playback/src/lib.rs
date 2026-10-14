@@ -215,6 +215,7 @@ impl AudioState {
                 Cmd::Input(r) => self.input = Some(r),
                 Cmd::Recording(r) => self.recording = r,
                 Cmd::Audition(track, note) => {
+                    self.mix.monitor_only = !self.playing;
                     self.mix.audition(&self.session, track, note);
                     self.audition_frames = (self.device_rate.max(1.0) * 2.0) as usize;
                     if !self.playing {
@@ -244,6 +245,7 @@ impl AudioState {
                 }
                 Cmd::OldSessions(tx) => self.old_sessions = Some(tx),
                 Cmd::Play { from, end, looped } => {
+                    self.audition_frames = 0;
                     self.pos = from;
                     self.end = end;
                     self.looped = looped.filter(|r| r.len() > 64);
@@ -260,6 +262,7 @@ impl AudioState {
                     self.mix.reset();
                 }
                 Cmd::Locate(at) => {
+                    self.audition_frames = 0;
                     self.pos = at;
                     self.pending_len = 0;
                     self.read = 0.0;
@@ -1332,5 +1335,38 @@ mod tests {
         st.fill(&mut out, 2);
         assert!(out.iter().any(|x| x.abs() > 0.1), "the input is heard");
         assert!(shared.meters.lock().unwrap().tracks.get(&t).is_some_and(|m| m.peak[0] > 0.1), "and metered");
+    }
+}
+
+#[cfg(test)]
+mod audition_transport_tests {
+    use super::*;
+
+    #[test]
+    fn audition_uses_stopped_monitor_mode_and_transport_commands_clear_its_timer() {
+        let mut session = Session::default();
+        let track = session.add_track(soundcraft_model::TrackKind::Instrument, soundcraft_model::ChannelFormat::Stereo, None);
+        session.track_mut(track).unwrap().instrument = Some(soundcraft_model::Insert::new("drum_rack"));
+        let shared = Arc::new(Shared {
+            position: AtomicI64::new(0), playing: AtomicBool::new(false), speed: AtomicU32::new(1000),
+            meters: Mutex::new(MeterSnapshot::default()),
+        });
+        let (sender, receiver) = channel();
+        let mut state = AudioState::new(receiver, shared, Arc::new(session), 48_000.0, channel().0);
+        sender.send(Cmd::Audition(track, 36)).unwrap();
+        state.drain();
+        assert!(state.mix.monitor_only);
+        assert!(state.audition_frames > 0);
+        sender.send(Cmd::Play { from: 0, end: None, looped: None }).unwrap();
+        state.drain();
+        assert_eq!(state.audition_frames, 0);
+        assert!(state.mix.audition_track.is_none());
+        sender.send(Cmd::Audition(track, 36)).unwrap();
+        state.drain();
+        assert!(!state.mix.monitor_only);
+        sender.send(Cmd::Locate(4800)).unwrap();
+        state.drain();
+        assert_eq!(state.audition_frames, 0);
+        assert!(state.mix.audition_track.is_none());
     }
 }

@@ -5,7 +5,7 @@ use soundcraft_model::{Insert, SourceId, TrackKind};
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
-        cmd!("mix.drum_kit_load", "Load Drum Kit", [], None, "{track?, paths: [audio paths], replace?: false}", has_selection, kit),
+        cmd!("mix.drum_kit_load", "Load Drum Kit", [], None, "{track?, paths: [audio paths], replace?: false, skip_invalid?: false}", has_selection, kit),
         cmd!("mix.drum_pad_load", "Load Drum Pad", [], None, "{track?, note: 36..51, path?|source?}", has_selection, load),
         cmd!(noundo "mix.drum_pad_audition", "Audition Drum Pad", [], None, "{track?, note: 36..51}", has_selection, audition),
         cmd!("mix.drum_pad_clear", "Clear Drum Pad", [], None, "{track?, note: 36..51}", has_selection, clear),
@@ -31,22 +31,41 @@ fn kit(engine: &mut Engine, params: &Value) -> Result<Value> {
         object.insert("note".into(), json!(36));
     }
     let (track, _, mut insert) = target(engine, &target_params, "mix.drum_kit_load")?;
-    if bool_or(params, "replace", false) {
+    let replace = bool_or(params, "replace", false);
+    let skip_invalid = bool_or(params, "skip_invalid", false);
+    let available: Vec<u8> = if skip_invalid {
+        (36..=51).filter(|note| replace || !insert.pad_samples.contains_key(note)).collect()
+    } else {
+        Vec::new()
+    };
+    if replace {
         insert.pad_samples.clear();
         if let Some(track) = engine.session_mut().track_mut(track) {
             track.instrument = Some(insert);
         }
     }
     let mut loaded = 0usize;
+    let mut skipped = Vec::new();
     for (index, path) in paths.iter().enumerate() {
-        let note = 36 + index as u8;
-        if !bool_or(params, "replace", false) && engine.session().track(track).and_then(|track| track.instrument.as_ref()).is_some_and(|insert| insert.pad_samples.contains_key(&note)) {
+        let note = if skip_invalid {
+            let Some(note) = available.get(loaded).copied() else { break };
+            note
+        } else {
+            36 + index as u8
+        };
+        if !replace && engine.session().track(track).and_then(|track| track.instrument.as_ref()).is_some_and(|insert| insert.pad_samples.contains_key(&note)) {
             continue;
         }
-        load(engine, &json!({"track": track.0, "note": note, "path": path}))?;
-        loaded += 1;
+        match load(engine, &json!({"track": track.0, "note": note, "path": path})) {
+            Ok(_) => loaded += 1,
+            Err(error) if skip_invalid => skipped.push(error.to_string()),
+            Err(error) => return Err(error),
+        }
     }
-    Ok(json!({"track": track, "loaded": loaded}))
+    if loaded == 0 && !skipped.is_empty() {
+        return Err(bad("mix.drum_kit_load", format!("no samples could be loaded: {}", skipped.join("; "))));
+    }
+    Ok(json!({"track": track, "loaded": loaded, "skipped": skipped}))
 }
 
 fn load(engine: &mut Engine, params: &Value) -> Result<Value> {
@@ -203,5 +222,46 @@ mod kit_tests {
         engine.execute("edit.undo", &json!({})).unwrap();
         assert_eq!(engine.session(), &before);
         std::fs::remove_dir_all(folder).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tolerant_kit_tests {
+    use super::*;
+    use soundcraft_audio_io::{AudioBuffer, BitDepth, EncodeOptions, FileFormat};
+
+    #[test]
+    fn random_kits_skip_bad_files_and_keep_atomic_undo_and_failed_replacement_rollback() {
+        let mut engine = Engine::new(crate::starter_session("Kit", soundcraft_time::SampleRate::HZ_48000));
+        let track = engine.session().track_by_name("MIDI 1").unwrap().id;
+        let root = std::env::temp_dir().join(format!("gdaw-tolerant-kit-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let good = root.join("good.wav");
+        let bad = root.join("bad.wav");
+        let audio = AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.5; 480]] };
+        let options = EncodeOptions { format: FileFormat::Wav, bit_depth: BitDepth::Int16, dither: false, bwf: None };
+        std::fs::write(&good, soundcraft_audio_io::encode(&audio, &options).unwrap()).unwrap();
+        std::fs::write(&bad, b"unreadable sample").unwrap();
+        let before = engine.session().clone();
+        let steps = engine.undo_history().len();
+        let result = engine.execute("mix.drum_kit_load", &json!({"track": track.0, "paths": [bad, good], "skip_invalid": true})).unwrap();
+        assert_eq!(result["loaded"], 1);
+        assert_eq!(result["skipped"].as_array().unwrap().len(), 1);
+        let rack = engine.session().track(track).unwrap().instrument.as_ref().unwrap();
+        assert!(rack.pad_samples.contains_key(&36));
+        assert!(!rack.pad_samples.contains_key(&37));
+        assert_eq!(engine.undo_history().len(), steps + 1);
+        let loaded = engine.session().clone();
+        engine.execute("mix.drum_kit_load", &json!({"track": track.0, "paths": [bad, good], "skip_invalid": true})).unwrap();
+        let rack = engine.session().track(track).unwrap().instrument.as_ref().unwrap();
+        assert_eq!(rack.pad_samples.get(&36), loaded.track(track).unwrap().instrument.as_ref().unwrap().pad_samples.get(&36));
+        assert!(rack.pad_samples.contains_key(&37));
+        engine.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(engine.session(), &loaded);
+        assert!(engine.execute("mix.drum_kit_load", &json!({"track": track.0, "paths": [bad], "skip_invalid": true, "replace": true})).is_err());
+        assert_eq!(engine.session(), &loaded);
+        engine.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(engine.session(), &before);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

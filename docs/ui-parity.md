@@ -68,6 +68,7 @@ Legend: ✅ matches · 🟡 partial · ❌ missing.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-14 | GDAW reliability | Cancellable native library discovery, tolerant automatic kits with strict explicit loads, stopped preview cleanup, transport timer reset and stale sample-event cleanup; regression source added, runtime verification pending |
 | 2026-10-14 | GDAW | Visible inserts/sends, bounded slots, targeted drops, shared catalog menus, editable I/O, scrollable mixer and regression fixture corrections. Syntax checked; Rust/UI/hardware tests pending |
 | 2026-10-13 | minor | Drag across checkboxes (#399) |
 | 2026-10-13 | minor | Waveforms and fade curves share temporary envelopes during drag, without rebuilding media or editing the document before release. Readiness estimate unchanged |

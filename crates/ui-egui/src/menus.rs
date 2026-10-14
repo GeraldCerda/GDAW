@@ -524,6 +524,7 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
                 return Some(Err("Choose an accessible sample folder".into()));
             }
             app.ui.drum_library = path.into();
+            app.browser.library_scan = None;
             app.browser.library_loaded.clear();
             app.browser.library_files.clear();
             app.browser.auto_kits.clear();

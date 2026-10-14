@@ -23,6 +23,7 @@ pub struct BrowserState {
     pub folder: PathBuf,
     pub library_loaded: String,
     pub library_files: Vec<PathBuf>,
+    pub library_scan: Option<DrumLibraryScan>,
     pub auto_kits: std::collections::BTreeSet<TrackId>,
     pub files: Vec<(String, PathBuf, bool)>,
     pub pad: u8,
@@ -42,6 +43,7 @@ impl Default for BrowserState {
             folder: PathBuf::new(),
             library_loaded: String::new(),
             library_files: Vec::new(),
+            library_scan: None,
             auto_kits: std::collections::BTreeSet::new(),
             files: Vec::new(),
             pad: 36,
@@ -531,11 +533,16 @@ pub fn chain(app: &mut SoundApp, ui: &mut Ui) {
                     }
                     if !app.ui.drum_library.is_empty() {
                         ui.small(app.ui.drum_library.as_str());
-                        if ui.add_enabled(!app.browser.library_files.is_empty(), egui::Button::new("Load random kit")).clicked() {
-                            let paths = random_kit(&app.browser.library_files);
-                            if let Err(error) = app.run("mix.drum_kit_load", json!({"track": track.id.0, "paths": paths, "replace": true})) {
-                                app.ui.status = error;
-                            }
+                        if app.browser.library_scan.is_some() {
+                            ui.weak("Scanning drum library…");
+                            ui.ctx().request_repaint_after_secs(0.05);
+                        }
+                        if ui.add_enabled(app.browser.library_scan.is_none() && !app.browser.library_files.is_empty(), egui::Button::new("Load random kit")).clicked() {
+                            load_random_kit(app, track.id, true);
+                        }
+                        if ui.button("Rescan drum library").clicked() {
+                            let path = app.ui.drum_library.clone();
+                            let _ = app.run("ui.drum_library", json!({"path": path}));
                         }
                     }
                 }
@@ -572,16 +579,54 @@ pub(crate) fn input_route_problem(app: &SoundApp, track: &soundcraft_model::Trac
         .then(|| format!("{} is outside the opened {channels}-channel input device", crate::mix_window::input_name(app, track)))
 }
 
-fn drum_samples(root: &std::path::Path) -> Vec<PathBuf> {
+pub struct DrumLibraryScan {
+    path: String,
+    receiver: std::sync::mpsc::Receiver<Result<Vec<PathBuf>, String>>,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drop for DrumLibraryScan {
+    fn drop(&mut self) {
+        self.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+fn start_library_scan(path: String) -> Result<DrumLibraryScan, String> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let scan_path = path.clone();
+    let scan_cancel = std::sync::Arc::clone(&cancel);
+    let scan = move || {
+        let result = drum_samples(std::path::Path::new(&scan_path), &scan_cancel);
+        let _ = sender.send(result);
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = std::thread::Builder::new().name("drum library scan".into()).spawn(scan).map_err(|error| error.to_string())?;
+    #[cfg(target_arch = "wasm32")]
+    scan();
+    Ok(DrumLibraryScan { path, receiver, cancel })
+}
+
+fn drum_samples(root: &std::path::Path, cancel: &std::sync::atomic::AtomicBool) -> Result<Vec<PathBuf>, String> {
     let mut folders = vec![(root.to_path_buf(), 0usize)];
     let mut files = Vec::new();
     let mut inspected = 0usize;
     while let Some((folder, depth)) = folders.pop() {
-        let Ok(entries) = std::fs::read_dir(folder) else { continue };
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err("Drum library scan cancelled".into());
+        }
+        let entries = match std::fs::read_dir(&folder) {
+            Ok(entries) => entries,
+            Err(error) if depth == 0 => return Err(format!("{}: {error}", folder.display())),
+            Err(_) => continue,
+        };
         for entry in entries.flatten() {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err("Drum library scan cancelled".into());
+            }
             inspected += 1;
             if inspected > 8192 || files.len() >= 4096 {
-                return files;
+                return Ok(files);
             }
             let path = entry.path();
             let Ok(metadata) = std::fs::symlink_metadata(&path) else { continue };
@@ -590,14 +635,14 @@ fn drum_samples(root: &std::path::Path) -> Vec<PathBuf> {
             }
             if metadata.is_dir() && depth < 8 {
                 folders.push((path, depth + 1));
-            } else if metadata.is_file() && metadata.len() <= 16_777_216
+            } else if metadata.is_file() && metadata.len() > 0 && metadata.len() <= 16_777_216
                 && crate::sampler_window::is_audio_name(&entry.file_name().to_string_lossy())
             {
                 files.push(path);
             }
         }
     }
-    files
+    Ok(files)
 }
 
 fn random_kit(files: &[PathBuf]) -> Vec<String> {
@@ -619,24 +664,72 @@ fn random_kit(files: &[PathBuf]) -> Vec<String> {
 
 pub fn prepare_drum_library(app: &mut SoundApp) {
     if app.ui.drum_library.is_empty() {
+        app.browser.library_scan = None;
+        app.browser.library_loaded.clear();
+        app.browser.library_files.clear();
+        app.browser.auto_kits.clear();
         return;
     }
+    if app.browser.library_scan.as_ref().is_some_and(|scan| scan.path != app.ui.drum_library) {
+        app.browser.library_scan = None;
+    }
     if app.browser.library_loaded != app.ui.drum_library {
-        app.browser.library_files = drum_samples(std::path::Path::new(&app.ui.drum_library));
-        app.browser.library_loaded = app.ui.drum_library.clone();
+        app.browser.library_scan = None;
+        app.browser.library_files.clear();
         app.browser.auto_kits.clear();
+        app.browser.library_loaded = app.ui.drum_library.clone();
+        match start_library_scan(app.ui.drum_library.clone()) {
+            Ok(scan) => {
+                app.browser.library_scan = Some(scan);
+                app.ui.status = "Scanning drum sample library…".into();
+            }
+            Err(error) => {
+                app.ui.status = format!("Cannot scan drum library: {error}");
+                return;
+            }
+        }
+    }
+    let completed = app.browser.library_scan.as_ref().map(|scan| scan.receiver.try_recv());
+    match completed {
+        Some(Ok(result)) => {
+            app.browser.library_scan = None;
+            match result {
+                Ok(files) => {
+                    app.ui.status = if files.is_empty() { "Library assigned; no usable audio files found".into() } else { format!("Drum library assigned · {} audio files", files.len()) };
+                    app.browser.library_files = files;
+                }
+                Err(error) => app.ui.status = format!("Cannot scan drum library: {error}"),
+            }
+        }
+        Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+            app.browser.library_scan = None;
+            app.ui.status = "Drum library scan stopped; rescan the library to retry".into();
+        }
+        _ => {}
+    }
+    if app.browser.library_scan.is_some() || app.browser.library_files.is_empty() {
+        return;
     }
     let racks: Vec<_> = app.engine.session().tracks.iter().filter_map(|track| {
         track.instrument.as_ref().filter(|insert| insert.plugin == "drum_rack").map(|insert| (track.id, insert.pad_samples.is_empty()))
     }).collect();
     for (track, empty) in racks {
-        if !app.browser.auto_kits.insert(track) || !empty || app.browser.library_files.is_empty() {
+        if !app.browser.auto_kits.insert(track) || !empty {
             continue;
         }
-        let paths = random_kit(&app.browser.library_files);
-        if let Err(error) = app.run("mix.drum_kit_load", json!({"track": track.0, "paths": paths, "replace": false})) {
-            app.ui.status = format!("Drum library: {error}");
+        load_random_kit(app, track, false);
+    }
+}
+
+fn load_random_kit(app: &mut SoundApp, track: TrackId, replace: bool) {
+    let paths = random_kit(&app.browser.library_files);
+    match app.run("mix.drum_kit_load", json!({"track": track.0, "paths": paths, "replace": replace, "skip_invalid": true})) {
+        Ok(result) => {
+            let loaded = result["loaded"].as_u64().unwrap_or(0);
+            let skipped = result["skipped"].as_array().map_or(0, Vec::len);
+            app.ui.status = if skipped == 0 { format!("Loaded {loaded} Drum Rack pads") } else { format!("Loaded {loaded} Drum Rack pads; skipped {skipped} unreadable samples") };
         }
+        Err(error) => app.ui.status = format!("Drum library: {error}"),
     }
 }
 
@@ -647,7 +740,6 @@ fn assign_drum_library(app: &mut SoundApp) {
             app.ui.status = error;
         } else {
             prepare_drum_library(app);
-            app.ui.status = if app.browser.library_files.is_empty() { "Library assigned; no usable audio samples found".into() } else { format!("Drum library assigned · {} samples", app.browser.library_files.len()) };
         }
     }
 }
@@ -668,5 +760,67 @@ mod drum_library_tests {
         assert_eq!(random_kit(&files[..3]).len(), 3);
         assert_eq!(drum_note_name(36), "C1");
         assert_eq!(drum_note_name(51), "D#2");
+    }
+}
+
+#[cfg(test)]
+mod library_scan_tests {
+    use super::*;
+    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+
+    #[test]
+    fn discovery_runs_in_a_worker_and_filters_empty_files_and_symlinks() {
+        let root = std::env::temp_dir().join(format!("gdaw-library-discovery-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        let sample = root.join("nested").join("kick.WAV");
+        std::fs::write(&sample, b"sample").unwrap();
+        std::fs::write(root.join("empty.wav"), b"").unwrap();
+        std::fs::write(root.join("notes.txt"), b"notes").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("nested"), root.join("linked")).unwrap();
+        let scan = start_library_scan(root.to_string_lossy().into_owned()).unwrap();
+        let result = scan.receiver.recv_timeout(std::time::Duration::from_secs(5)).unwrap().unwrap();
+        assert_eq!(result, vec![sample]);
+        drop(scan);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn clearing_a_library_cancels_pending_results_and_preserves_the_session() {
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        let before = app.engine.session().clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        app.browser.library_scan = Some(DrumLibraryScan { path: "old".into(), receiver, cancel: Arc::clone(&cancel) });
+        app.browser.library_loaded = "old".into();
+        app.browser.library_files.push("old.wav".into());
+        sender.send(Ok(vec!["stale.wav".into()])).unwrap();
+        prepare_drum_library(&mut app);
+        assert!(cancel.load(Ordering::Relaxed));
+        assert!(app.browser.library_scan.is_none());
+        assert!(app.browser.library_files.is_empty());
+        assert!(app.browser.library_loaded.is_empty());
+        assert_eq!(app.engine.session(), &before);
+    }
+
+    #[test]
+    fn changing_a_library_discards_old_results_before_starting_its_scan() {
+        let root = std::env::temp_dir().join(format!("gdaw-library-switch-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        app.browser.library_scan = Some(DrumLibraryScan { path: "old".into(), receiver, cancel: Arc::clone(&cancel) });
+        app.browser.library_loaded = "old".into();
+        sender.send(Ok(vec!["stale.wav".into()])).unwrap();
+        app.ui.drum_library = root.to_string_lossy().into_owned();
+        prepare_drum_library(&mut app);
+        assert!(cancel.load(Ordering::Relaxed));
+        assert!(app.browser.library_files.is_empty());
+        assert_eq!(app.browser.library_loaded, app.ui.drum_library);
+        if let Some(scan) = app.browser.library_scan.take() {
+            assert!(scan.receiver.recv_timeout(std::time::Duration::from_secs(5)).unwrap().unwrap().is_empty());
+        }
+        std::fs::remove_dir(root).unwrap();
     }
 }

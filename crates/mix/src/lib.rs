@@ -618,6 +618,9 @@ impl MixEngine {
 
     /// Render `frames` (≤ max_block) samples starting at `pos` into `out` (≥ 2 channels).
     pub fn audition(&mut self, session: &Session, track: TrackId, note: u8) {
+        if self.monitor_only && self.audition_track.is_some_and(|previous| previous != track) {
+            self.end_audition();
+        }
         self.ensure_synced(session);
         if let Some(slot) = self.strips.get_mut(&track).and_then(|strip| strip.instrument.as_mut()) {
             slot.plugin.note_on(0, note, 127);
@@ -3333,5 +3336,63 @@ mod tests {
         }
         let e_ls = out[4][100].powi(2) + out[6][100].powi(2);
         assert!((e_ls - x(4).powi(2)).abs() < 1e-5, "Ls energy is preserved");
+    }
+}
+
+#[cfg(test)]
+mod drum_audition_tests {
+    use super::*;
+
+    fn session() -> (Session, TrackId, TrackId) {
+        let mut session = Session::default();
+        let source = soundcraft_model::SourceId(700);
+        session.pool.insert(source, Arc::new(SourceAudio::new(soundcraft_audio_io::AudioBuffer {
+            sample_rate: 48_000, channels: vec![vec![0.5; 48_000]],
+        })));
+        let first = session.add_track(TrackKind::Instrument, ChannelFormat::Stereo, Some("Rack A"));
+        let second = session.add_track(TrackKind::Instrument, ChannelFormat::Stereo, Some("Rack B"));
+        for id in [first, second] {
+            let mut instrument = soundcraft_model::Insert::new("drum_rack");
+            instrument.pad_samples.insert(36, source);
+            session.track_mut(id).unwrap().instrument = Some(instrument);
+        }
+        (session, first, second)
+    }
+
+    fn peak(audio: &[Vec<f32>]) -> f32 {
+        audio.iter().flatten().fold(0.0f32, |peak, sample| peak.max(sample.abs()))
+    }
+
+    #[test]
+    fn switching_stopped_racks_does_not_revive_the_previous_one_shot() {
+        let (session, first, second) = session();
+        let mut mixer = MixEngine::new(48_000.0, 128);
+        mixer.monitor_only = true;
+        let mut audio = vec![vec![0.0; 128]; 2];
+        mixer.audition(&session, first, 36);
+        mixer.render(&session, 0, 128, &mut audio);
+        let initial = peak(&audio);
+        assert!(initial > 0.1);
+        mixer.audition(&session, second, 36);
+        mixer.render(&session, 0, 128, &mut audio);
+        mixer.audition(&session, first, 36);
+        mixer.render(&session, 0, 128, &mut audio);
+        assert!((peak(&audio) - initial).abs() < 0.001);
+        mixer.end_audition();
+        mixer.render(&session, 0, 128, &mut audio);
+        assert!(peak(&audio) < 1e-6);
+    }
+
+    #[test]
+    fn switching_racks_during_playback_preserves_other_sounding_instruments() {
+        let (session, first, second) = session();
+        let mut mixer = MixEngine::new(48_000.0, 128);
+        let mut audio = vec![vec![0.0; 128]; 2];
+        mixer.audition(&session, first, 36);
+        mixer.render(&session, 0, 128, &mut audio);
+        let initial = peak(&audio);
+        mixer.audition(&session, second, 36);
+        mixer.render(&session, 128, 128, &mut audio);
+        assert!(peak(&audio) > initial * 1.8);
     }
 }

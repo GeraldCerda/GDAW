@@ -85,6 +85,12 @@ fn drum_library_setting_round_trips_without_loading_samples_when_unassigned() {
     std::fs::create_dir_all(&root).unwrap();
     harness.state_mut().run("ui.drum_library", json!({"path": root.to_string_lossy()})).unwrap();
     soundcraft_ui_egui::devices::prepare_drum_library(harness.state_mut());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while harness.state().browser.library_scan.is_some() {
+        assert!(std::time::Instant::now() < deadline);
+        soundcraft_ui_egui::devices::prepare_drum_library(harness.state_mut());
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
     assert!(harness.state().browser.library_files.is_empty());
     let saved = serde_json::to_value(&harness.state().ui).unwrap();
     let restored: soundcraft_ui_egui::UiState = serde_json::from_value(saved).unwrap();

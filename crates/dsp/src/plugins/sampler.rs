@@ -432,6 +432,7 @@ impl Plugin for Sampler {
     }
 
     fn set_sample(&mut self, sample: Option<Arc<dyn SampleSource>>) -> bool {
+        self.events.clear();
         for v in &mut self.voices {
             v.stop();
         }
@@ -814,5 +815,32 @@ mod tests {
                 assert!(out[0].iter().all(|v| v.is_finite() && v.abs() < 4.0), "mode {mode} transpose {t}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod sample_replacement_tests {
+    use super::*;
+    use crate::SampleBuffer;
+
+    #[test]
+    fn replacing_or_clearing_a_sample_discards_notes_queued_for_the_previous_sample() {
+        let mut sampler = Sampler::new();
+        sampler.prepare(48_000.0, 128, 2);
+        let first = Arc::new(SampleBuffer { sample_rate: 48_000.0, channels: vec![vec![0.5; 4800]] });
+        let second = Arc::new(SampleBuffer { sample_rate: 48_000.0, channels: vec![vec![0.25; 4800]] });
+        sampler.set_sample(Some(first));
+        sampler.note_on(0, 60, 127);
+        sampler.set_sample(Some(second));
+        let mut audio = vec![vec![0.0; 128]; 2];
+        sampler.process(&mut audio, 128);
+        assert!(audio.iter().flatten().all(|sample| sample.abs() < 1e-6));
+        sampler.note_on(0, 60, 127);
+        sampler.process(&mut audio, 128);
+        assert!(audio.iter().flatten().any(|sample| sample.abs() > 0.05));
+        sampler.note_on(0, 60, 127);
+        sampler.set_sample(None);
+        sampler.process(&mut audio, 128);
+        assert!(audio.iter().flatten().all(|sample| sample.abs() < 1e-6));
     }
 }
