@@ -123,6 +123,15 @@ mod tests {
         mixer.render(engine.session(), 0, 128, &mut preview);
         mixer.render(engine.session(), 0, 128, &mut preview);
         assert!(preview.iter().flatten().any(|value| value.abs() > 0.1));
+        engine.execute("mix.drum_pad_param", &json!({"track": track.0, "note": 36, "param": "pan", "value": 1.0})).unwrap();
+        mixer.audition(engine.session(), track, 36);
+        mixer.render(engine.session(), 0, 128, &mut preview);
+        assert!(preview[0].iter().all(|value| value.abs() < 1e-6));
+        assert!(preview[1].iter().any(|value| value.abs() > 0.1));
+        engine.execute("edit.undo", &json!({})).unwrap();
+        mixer.audition(engine.session(), track, 36);
+        mixer.render(engine.session(), 0, 128, &mut preview);
+        assert!(preview[0].iter().any(|value| value.abs() > 0.1));
         mixer.end_audition();
         mixer.render(engine.session(), 0, 128, &mut preview);
         assert!(preview.iter().flatten().all(|value| value.abs() < 1e-6));

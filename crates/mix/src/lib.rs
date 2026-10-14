@@ -1716,6 +1716,20 @@ fn apply_params(slot: &mut PluginSlot, ins: &soundcraft_model::Insert, t: &Track
 
 /// Sends each stored param (as mapped by `value`) to the plugin when it changed since last time.
 fn apply_values(slot: &mut PluginSlot, ins: &soundcraft_model::Insert, value: impl Fn(&str, f32) -> f32) {
+    if ins.plugin == "drum_rack" {
+        let parameters = slot.plugin.info().params;
+        if slot.applied.len() != parameters.len() {
+            slot.applied = vec![f32::NAN; parameters.len()];
+        }
+        for (parameter, last) in parameters.iter().zip(slot.applied.iter_mut()) {
+            let val = value(parameter.id, ins.params.get(parameter.id).copied().unwrap_or(parameter.default));
+            if val.to_bits() != last.to_bits() {
+                slot.plugin.set_param(parameter.id, val);
+                *last = val;
+            }
+        }
+        return;
+    }
     if slot.applied.len() != ins.params.len() {
         slot.applied = vec![f32::NAN; ins.params.len()];
     }
