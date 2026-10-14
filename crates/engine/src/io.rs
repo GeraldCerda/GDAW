@@ -1319,7 +1319,7 @@ pub fn plan_takes(e: &Engine, unsaved_dir: &Path, input_channels: usize) -> Vec<
                 }
                 _ => 0,
             };
-            let inputs = (0..t.channels()).map(|k| first.saturating_add(k) % input_channels.max(1)).collect();
+            let inputs = (0..t.channels()).map(|k| first.saturating_add(k)).collect();
             let file = |n: usize| dir.join("Audio Files").join(format!("{}_{n:02}.wav", sanitize_name(&t.name)));
             let path = (take_no..take_no + 1_000).map(file).find(|p| !p.exists()).unwrap_or_else(|| file(take_no));
             (t.id, inputs, path)
@@ -1439,7 +1439,7 @@ mod record_tests {
         write_take(&dir.join("Audio Files/Vox_01.wav"), 10);
         let plan = plan_takes(&e, &dir, 4);
         assert_eq!(plan, vec![(vox, vec![1], dir.join("Audio Files/Vox_02.wav")), (gtr, vec![2, 3], dir.join("Audio Files/Gtr_01.wav"))]);
-        assert_eq!(plan_takes(&e, &dir, 2)[1].1, vec![0, 1]);
+        assert_eq!(plan_takes(&e, &dir, 2)[1].1, vec![2, 3]);
 
         let session = dir.join("Song.scraft").to_string_lossy().into_owned();
         e.execute("session.save_as", &json!({"path": session})).unwrap();
