@@ -1,6 +1,6 @@
 GDAW Mac Test Kit v4
 
-Source revision: 75f9e4d51fe5f5b47bb9a26f79d11eee056fd7f5
+Source revision: 97cf05fdc911a6684bc326d19d9c5197fcd31a33
 Repository: https://github.com/GeraldCerda/GDAW
 
 This kit contains source-download, build and launch scripts. It downloads the complete pinned source from your fork when you run it on your Mac. No binary is included and no DAW build was performed while preparing this kit.
@@ -9,7 +9,7 @@ Save the ZIP to Downloads and run the supplied Terminal command. The script inst
 
 The app goes to ~/Applications/GDAW Test.app. Previous tester copies are renamed as timestamped backups. Settings, presets and autosaves used by launch_test.sh go to ~/Library/Application Support/GDAW Test. Always launch with launch_test.sh to keep this isolated profile. Double-clicking the app directly uses the default profile.
 
-New sessions start with MIDI 1 and its 16-pad Drum Rack, plus mono Audio 1 assigned physical input 1. Input and output columns, a left browser, and the bottom selected-track device chain are visible. Cmd+= opens or focuses a separate mixer while preserving the Edit window. The main window and app menu are called G; the test bundle remains GDAW Test for easy identification.
+New sessions start with MIDI 1 and its 16-pad Drum Rack, plus mono Audio 1 assigned physical input 1. Input and output columns, a left browser, and the bottom selected-track device chain are visible. Cmd+= shows or hides a separate mixer while preserving the Edit window; opening it requests focus. The main window and app menu are called G; the test bundle remains GDAW Test for easy identification.
 
 Plugin browsing defaults to developer groups. Switch Group by to Effect for compressors, EQs, limiters, gates, reverbs and the other reported categories. Filter by AU, VST3, CLAP or Built-in without collapsing distinct plugin versions. Search covers names, developer, effect group and format. Installed plugins are scanned in a background thread; Rescan refreshes the list. Plugins without usable classification remain in Other Effects or Dynamics. Matching AU/VST3 names and developers share the most specific available category.
 
@@ -58,3 +58,9 @@ Complete Pro Tools shortcut parity is unfinished. The egui input layer does not 
 Native VST3/CLAP discovery remains isolated in per-bundle helper processes. Runtime plugin processing after insertion remains in-process.
 
 Regression tests were added but not executed during source preparation. This source revision needs a Mac compile, UI checks and microphone/hardware testing.
+
+EDIT/MIX AUDIT UPDATE
+
+Pinned source 97cf05fdc911a6684bc326d19d9c5197fcd31a33 adds distinct Inserts A-E and Sends A-E to both starter tracks, keeps all five slots visible at medium heights, accepts browser effects in exact insert slots, shares developer/effect/format menus with the browser, adds Edit I/O fader/pan controls, and prevents mixer section overlap with vertical scrolling. Old preferences get a one-time visible-column migration. New sessions use absolute eighth-note Grid mode.
+
+The source audit and remaining gaps are in docs/GDAW_EDIT_MIX_AUDIT_2026-10-14.md. Syntax parsing and shell syntax checks were performed; no Rust tests, app compilation or hardware testing were run while preparing this update. Full Pro Tools shortcut parity and the complete Ableton Drum Rack feature set remain unfinished. This source pin is not a production-readiness certification.
