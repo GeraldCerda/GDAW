@@ -35,7 +35,7 @@ pub mod windows;
 
 use serde_json::{Value, json};
 use soundcraft_engine::{Engine, TransportRequest};
-use soundcraft_model::TrackId;
+use soundcraft_model::{Route, TrackId, TrackKind};
 use soundcraft_playback::record::Trouble;
 use soundcraft_playback::{OutputTrouble, Player};
 use soundcraft_time::{Range, Samples};
@@ -1102,6 +1102,24 @@ impl SoundApp {
             self.engine.transport.position = *pos;
             if stop {
                 self.stop_play();
+            }
+        }
+        if let Some(recorder) = &self.recorder {
+            let peaks = recorder.take_input_peaks();
+            let inputs: Vec<_> = self.engine.session().tracks.iter()
+                .filter(|track| track.kind == TrackKind::Audio && (track.mixer.record_arm || track.mixer.input_monitor))
+                .map(|track| {
+                    let first = match &track.mixer.input {
+                        Route::Hardware(input) => input.trim_start_matches("In ").split(['-', ' ']).next().and_then(|n| n.parse::<usize>().ok()).map_or(0, |n| n.saturating_sub(1)),
+                        _ => 0,
+                    };
+                    let left = peaks.get(first).copied().unwrap_or(0.0);
+                    let right = if track.channels() > 1 { peaks.get(first.saturating_add(1)).copied().unwrap_or(0.0) } else { left };
+                    (track.id, [left, right])
+                })
+                .collect();
+            for (id, peak) in inputs {
+                feed_meter(self.meters.entry(id).or_default(), peak, 0.0, dt);
             }
         }
         if !self.meters_live() {
