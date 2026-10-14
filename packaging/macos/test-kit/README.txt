@@ -1,6 +1,6 @@
-GDAW Mac Test Kit v3
+GDAW Mac Test Kit v4
 
-Source revision: f68e05bd302f72c63808997936e59380d251a8f7
+Source revision: 4733b8c4b100cf76f54e35cb4b71ebb94257ec7a
 Repository: https://github.com/GeraldCerda/GDAW
 
 This kit contains source-download, build and launch scripts. It downloads the complete pinned source from your fork when you run it on your Mac. No binary is included and no DAW build was performed while preparing this kit.
@@ -18,11 +18,15 @@ Physical audio input capture now starts for assigned audio tracks even before re
 The Drum Rack starts with empty pads. Load your own samples through Load, the sample browser, the clip list, or a Finder drop onto a pad. Assigned pads support stopped-transport audition, gain, pan, tuning and mute. Built-in devices have inline controls in the bottom chain. Hosted plugins open native editor windows. The browser supports device search, sample folders, saved presets and loading devices onto the selected track. Warp, formant and clip-pitch automation work is outside this change.
 
 Commands after extraction:
-bash "$HOME/Downloads/GDAW_Mac_Test_Kit_v3/build_test.sh"
-bash "$HOME/Downloads/GDAW_Mac_Test_Kit_v3/launch_test.sh"
+bash "$HOME/Downloads/GDAW_Mac_Test_Kit_v4/build_test.sh"
+bash "$HOME/Downloads/GDAW_Mac_Test_Kit_v4/launch_test.sh"
+
+Default build mode installs and launches after compilation. Optional verification deliberately stops before installation if any test fails. To reuse a v3 build cache, replace its build_test.sh with the current pinned script and run it without --verify.
+
+Fade controls now use the visible editor bounds for drawing and hit-testing. Headless editor tests do not automatically scan native plugins. The reported test-process SIGSEGV has not been independently reproduced or conclusively diagnosed.
 
 Optional regression run on your Mac:
-bash "$HOME/Downloads/GDAW_Mac_Test_Kit_v3/build_test.sh" --verify
+bash "$HOME/Downloads/GDAW_Mac_Test_Kit_v4/build_test.sh" --verify
 
 Optional mode reports formatting results, then compiles and runs DSP, model, engine, mix, playback and UI regression suites before building the app. A failing test stops the script. Default mode compiles the desktop app without running these tests.
 
