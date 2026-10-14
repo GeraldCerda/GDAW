@@ -14,7 +14,7 @@ if [ "$(uname -s)" != "Darwin" ]; then
     exit 2
 fi
 
-commit="b5ef359a5a1860541fc352deea40bbd6a03f1d3d"
+commit="7c4a32f074f92694e05159e94dc25e8c28aa52d4"
 mkdir -p "$kit_dir/logs"
 build_log="$kit_dir/logs/build-$(date +%Y%m%d-%H%M%S).log"
 exec > >(tee -a "$build_log") 2>&1
@@ -71,7 +71,7 @@ if [ "$verify" = "1" ]; then
     else
         printf 'Formatting check failed; continuing to compile and run the regression suites.\n'
     fi
-    cargo +stable test --locked --release --target "$target" -p soundcraft-model -p soundcraft-engine -p soundcraft-mix -p soundcraft-playback -p soundcraft-ui-egui
+    cargo +stable test --locked --release --target "$target" -p soundcraft-dsp -p soundcraft-model -p soundcraft-engine -p soundcraft-mix -p soundcraft-playback -p soundcraft-ui-egui
 fi
 
 cargo +stable build --locked --release --target "$target" -p soundcraft
@@ -84,7 +84,7 @@ stage="$(mktemp -d "$kit_dir/app-stage.XXXXXX")"
 app="$stage/GDAW Test.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$binary" "$app/Contents/MacOS/GDAW-Test"
-cp "$source_dir/assets/app-icon/soundcraft.icns" "$app/Contents/Resources/GDAW-Test.icns"
+bash "$source_dir/packaging/macos/make-g-icon.sh" "$source_dir/Purple G icon with transparent background.png" "$app/Contents/Resources/GDAW-Test.icns"
 cp "$source_dir/LICENSE-MIT" "$source_dir/LICENSE-APACHE" "$source_dir/NOTICE" "$source_dir/ATTRIBUTION.md" "$app/Contents/Resources/"
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
