@@ -5,7 +5,7 @@ use crate::theme::{Tokens, bold, regular};
 use egui::{Align2, Color32, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use serde_json::json;
 use soundcraft_model::{ClipContent, ClipId, Tool};
-use soundcraft_time::TICKS_PER_QUARTER;
+use soundcraft_time::{NoteValue, TICKS_PER_QUARTER};
 
 const KEY_W: f32 = 48.0;
 const ROW_H: f32 = 9.0;
@@ -93,7 +93,7 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
         pos2(header.min.x + 110.0, header.center().y),
         Align2::LEFT_CENTER,
         format!(
-            "{} · {} notes · {} selected · Pencil: add · drag: move/select · arrows: move · Delete: remove",
+            "{} · {} notes · {} selected · Double-click: add · drag: move/select · arrows: move",
             clip.name,
             sequence.notes.len(),
             app.midi.selected.len()
@@ -103,7 +103,13 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
     );
     let grid_ticks = match app.engine.session().edit.grid {
         soundcraft_time::GridValue::Note { value, dotted, triplet } => {
-            let mut g = value.ticks();
+            let mut g = if value == NoteValue::Bar {
+                let session = app.engine.session();
+                let at = session.tempo.samples_to_ticks(clip.start, session.sample_rate);
+                session.tempo.meter_at_tick(at).ticks_per_bar()
+            } else {
+                value.ticks()
+            };
             if dotted {
                 g = g * 3 / 2;
             }
@@ -115,7 +121,7 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
         _ => TICKS_PER_QUARTER / 4,
     };
     // Header toolbar: whole-clip MIDI operations.
-    let bar = Rect::from_min_max(pos2(header.max.x - 330.0, header.min.y + 1.0), pos2(header.max.x - 6.0, header.max.y - 1.0));
+    let bar = Rect::from_min_max(pos2(header.max.x - 465.0, header.min.y + 1.0), pos2(header.max.x - 6.0, header.max.y - 1.0));
     let mut tb = ui.new_child(egui::UiBuilder::new().max_rect(bar).layout(egui::Layout::right_to_left(egui::Align::Center)));
     tb.spacing_mut().item_spacing.x = 4.0;
     let mut op: Option<(&str, serde_json::Value)> = None;
@@ -131,6 +137,14 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
     if tb.small_button("Quantize").on_hover_text("Quantize to the grid").clicked() {
         op = Some(("event.quantize", json!({"grid": grid_ticks, "strength": 100})));
     }
+    let selected_grid = app.engine.session().edit.grid;
+    egui::ComboBox::from_id_salt(("midi-grid", cid.0)).width(84.0).selected_text(format!("Grid {}", selected_grid.label())).show_ui(&mut tb, |ui| {
+        for (label, value) in [("1 bar", "1 bar"), ("1/4", "1/4"), ("1/8", "1/8"), ("1/16", "1/16"), ("1/32", "1/32"), ("1/64", "1/64"), ("1/8T", "1/8t"), ("1/16T", "1/16t"), ("1/32T", "1/32t")] {
+            if ui.selectable_label(selected_grid.label() == soundcraft_time::GridValue::Note { value: match value { "1 bar" => NoteValue::Bar, "1/4" => NoteValue::Quarter, "1/8" | "1/8t" => NoteValue::Eighth, "1/16" | "1/16t" => NoteValue::Sixteenth, "1/32" | "1/32t" => NoteValue::ThirtySecond, _ => NoteValue::SixtyFourth }, dotted: false, triplet: value.ends_with('t') }.label(), label).clicked() {
+                let _ = app.run("view.grid", json!({"value": value}));
+            }
+        }
+    });
     if let Some((id, mut p)) = op {
         p["clips"] = json!([cid.0]);
         let _ = app.run(id, p);
@@ -155,8 +169,8 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
     }
     app.midi.scroll = app.midi.scroll.clamp(0.0, (128.0 * ROW_H - roll.height()).max(0.0));
     let scroll = app.midi.scroll;
-    let px_per_tick = roll.width() / len_ticks as f32;
-    let x_of = |tick: i64| roll.min.x + tick as f32 * px_per_tick;
+    let px_per_tick = f64::from(roll.width()) / len_ticks as f64;
+    let x_of = |tick: i64| (f64::from(roll.min.x) + tick as f64 * px_per_tick) as f32;
     let y_of = |pitch: i32| roll.min.y + (127 - pitch) as f32 * ROW_H - scroll;
     let pitch_at = |y: f32| 127 - ((y - roll.min.y + scroll) / ROW_H).floor() as i32;
     let painter = ui.painter().with_clip_rect(roll.union(keys));
@@ -231,7 +245,7 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
             r.contains(pos).then_some((i, pos.x > r.max.x - 5.0))
         })
     };
-    let snap = |tk: f32| -> i64 { ((tk / grid_ticks as f32).round() as i64) * grid_ticks };
+    let snap = |pixels: f32| -> i64 { ((f64::from(pixels) / px_per_tick / grid_ticks as f64).round() as i64).saturating_mul(grid_ticks) };
     if resp.drag_started()
         && let Some(p) = resp.interact_pointer_pos()
     {
@@ -274,7 +288,7 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
     if resp.dragged()
         && let (Some(d), Some(p)) = (&mut app.midi.drag, resp.interact_pointer_pos())
     {
-        d.dx_ticks = snap((p.x - d.start.x) / px_per_tick);
+        d.dx_ticks = snap(p.x - d.start.x);
         d.dy_semi = -((p.y - d.start.y) / ROW_H).round() as i64;
     }
     if resp.drag_stopped()
@@ -303,9 +317,10 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
                 }
                 // Audition on the instrument would go here (needs a live MIDI input path).
             }
-            None if s.edit.tool == Tool::Pencil => {
+            None if s.edit.tool == Tool::Pencil || resp.double_clicked() => {
                 let pitch = pitch_at(p.y).clamp(0, 127);
-                let start = (((p.x - roll.min.x) / px_per_tick) as i64 / grid_ticks) * grid_ticks;
+                let ticks = (f64::from(p.x - roll.min.x) / px_per_tick).max(0.0);
+                let start = ((ticks / grid_ticks as f64).floor() as i64).saturating_mul(grid_ticks);
                 let _ = app.run(
                     "midi.note_add",
                     json!({"clip": cid.0, "pitch": pitch, "start_ticks": start.max(0), "length_ticks": grid_ticks, "velocity": 100}),
