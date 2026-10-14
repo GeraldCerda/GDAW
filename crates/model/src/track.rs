@@ -261,6 +261,10 @@ impl Track {
         } else {
             "volume"
         };
+        let mut mixer = Mixer::new(format);
+        if kind == TrackKind::Audio {
+            mixer.input = crate::Route::Hardware("In 1".into());
+        }
         Track {
             id,
             playlists: vec![Playlist::new(name.clone())],
@@ -270,7 +274,7 @@ impl Track {
             color,
             height: TrackHeight::Medium,
             active_playlist: 0,
-            mixer: Mixer::new(format),
+            mixer,
             automation: Vec::new(),
             view: view.into(),
             hidden: false,
@@ -332,10 +336,12 @@ mod tests {
     fn new_track_defaults() {
         let t = Track::new(TrackId(1), "Gtr", TrackKind::Audio, ChannelFormat::Stereo, TRACK_COLORS[0]);
         assert_eq!(t.channels(), 2);
+        assert_eq!(t.mixer.input, crate::Route::Hardware("In 1".into()));
         assert_eq!(t.view, "waveform");
         assert_eq!(t.playlists.len(), 1);
         let m = Track::new(TrackId(2), "Keys", TrackKind::Midi, ChannelFormat::Stereo, TRACK_COLORS[0]);
         assert_eq!(m.format, ChannelFormat::Mono);
+        assert_eq!(m.mixer.input, crate::Route::None);
         assert_eq!(m.view, "notes");
     }
 

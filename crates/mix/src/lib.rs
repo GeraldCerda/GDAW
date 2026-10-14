@@ -911,16 +911,14 @@ fn process_strip(
     match t.kind {
         TrackKind::Audio if !live.input.is_empty() && t.mixer.input_monitor => {
             // Input monitoring: the track hears its hardware input instead of its clips.
-            let first = match &t.mixer.input {
-                Route::Hardware(h) => {
-                    h.trim_start_matches("In ").split(['-', ' ']).next().and_then(|n| n.parse::<usize>().ok()).map_or(0, |n| n.saturating_sub(1))
-                }
-                _ => 0,
-            };
-            for (k, dst) in strip.buf.iter_mut().enumerate() {
-                if let Some(src) = live.input.get(first.saturating_add(k)) {
-                    for (d, x) in dst.iter_mut().zip(src.iter()).take(frames) {
-                        *d = *x;
+            if let Some(first) = t.mixer.input.hardware_input_start()
+                && first.checked_add(t.channels()).is_some_and(|end| end <= live.input.len())
+            {
+                for (k, dst) in strip.buf.iter_mut().enumerate() {
+                    if let Some(src) = live.input.get(first.saturating_add(k)) {
+                        for (d, x) in dst.iter_mut().zip(src.iter()).take(frames) {
+                            *d = *x;
+                        }
                     }
                 }
             }
@@ -3057,6 +3055,21 @@ mod tests {
         s.track_mut(t).unwrap().mixer.input_monitor = true;
         eng.render(&s, 0, 512, &mut out);
         assert!(out[0][100].abs() > 0.1);
+    }
+
+    #[test]
+    fn monitoring_never_substitutes_a_different_hardware_input() {
+        let (mut s, t) = session_with_dc(0.5, 4800);
+        s.track_mut(t).unwrap().mixer.input_monitor = true;
+        let mut eng = MixEngine::new(48_000.0, 512);
+        eng.input = vec![vec![0.25; 512]];
+        eng.monitor_only = true;
+        let mut out = vec![vec![0.0; 512]; 2];
+        for route in [Route::None, Route::Main, Route::Bus(BusId(1)), Route::Hardware("In 2".into()), Route::Hardware("In 0".into())] {
+            s.track_mut(t).unwrap().mixer.input = route;
+            eng.render(&s, 0, 512, &mut out);
+            assert!(out.iter().flatten().all(|sample| sample.abs() < 1e-6));
+        }
     }
 
     #[test]

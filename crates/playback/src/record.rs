@@ -276,6 +276,9 @@ impl Recorder {
         if self.writer.is_some() {
             return Err("already recording".into());
         }
+        if takes.is_empty() || takes.iter().any(|(_, inputs, _)| inputs.is_empty() || inputs.iter().any(|&channel| channel >= self.channels)) {
+            return Err(format!("recording inputs must select available channels on the {}-channel input device", self.channels));
+        }
         let takes =
             takes.into_iter().map(|(id, inputs, path)| TakeWriter::create(id, inputs, path, self.sample_rate)).collect::<Result<Vec<_>, _>>()?;
         let live = takes.iter().map(|t| (t.id, Arc::clone(&t.live))).collect();
@@ -484,6 +487,7 @@ mod tests {
         Recorder {
             shared: Arc::clone(shared),
             monitor: InputRing::new(1, 48_000),
+            input_peaks: Arc::new(vec![AtomicU32::new(0)]),
             #[cfg(not(target_os = "freebsd"))]
             _stream: None,
             device_name: "Mic In".into(),
@@ -491,6 +495,29 @@ mod tests {
             channels: 1,
             writer: None,
             seen: (0, Instant::now()),
+        }
+    }
+
+    #[test]
+    fn input_peaks_are_independent_and_reset_after_reading() {
+        let shared = Arc::new(Shared::new(CaptureRing::new(64)));
+        let mut r = recorder(&shared);
+        r.input_peaks = Arc::new(vec![AtomicU32::new(0.25f32.to_bits()), AtomicU32::new(0.75f32.to_bits())]);
+        assert_eq!(r.take_input_peaks(), [0.25, 0.75]);
+        assert_eq!(r.take_input_peaks(), [0.0, 0.0]);
+    }
+
+    #[test]
+    fn invalid_recording_channels_are_rejected_before_creating_files() {
+        let shared = Arc::new(Shared::new(CaptureRing::new(64)));
+        let mut r = recorder(&shared);
+        let root = std::env::temp_dir().join(format!("soundcraft-invalid-input-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for inputs in [Vec::new(), vec![1], vec![usize::MAX]] {
+            assert!(r.arm(vec![(TrackId(1), inputs, root.join("take.wav"))]).is_err());
+            assert!(!root.exists());
+            assert!(r.writer.is_none());
+            assert!(!shared.armed.load(Ordering::Acquire));
         }
     }
 

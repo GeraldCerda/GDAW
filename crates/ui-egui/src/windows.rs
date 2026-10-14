@@ -652,8 +652,8 @@ pub fn io_setup(app: &mut SoundApp, ctx: &egui::Context) {
                 for (id, name, width, assigned, armed, monitoring) in tracks {
                     ui.label(name.as_str());
                     egui::ComboBox::from_id_salt(("hardware_input", id.0)).width(180.0).selected_text(&assigned).show_ui(ui, |ui| {
-                        if ui.selectable_label(assigned == "In 1", "Default (In 1)").clicked() {
-                            let _ = app.run("track.input", json!({"track": id.0, "input": "In 1"}));
+                        if ui.selectable_label(assigned == "no input", "no input").clicked() {
+                            let _ = app.run("track.input", json!({"track": id.0, "input": "none"}));
                         }
                         if count >= width {
                             for first in 1..=count - width + 1 {

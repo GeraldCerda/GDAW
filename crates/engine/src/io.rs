@@ -1302,26 +1302,21 @@ fn read_bundle(bytes: &[u8]) -> Result<(String, std::collections::HashMap<String
     Ok((text, files))
 }
 
-/// The record-enabled audio tracks, each with the input channels it records (those its input
-/// route names, "In 3" → 2, wrapped to the device's `input_channels`) and a new take file
-/// `<track>_<NN>.wav` in the `Audio Files` of the session's folder (`unsaved_dir` until it is saved).
 pub fn plan_takes(e: &Engine, unsaved_dir: &Path, _input_channels: usize) -> Vec<(TrackId, Vec<usize>, PathBuf)> {
     let dir = e.path.as_deref().and_then(|p| Path::new(p).parent()).unwrap_or(unsaved_dir);
     let s = e.session();
     let take_no = s.sources.len() + 1;
+    let mut reserved = std::collections::HashSet::new();
     s.tracks
         .iter()
         .filter(|t| t.mixer.record_arm && t.kind == TrackKind::Audio && !t.inactive)
         .map(|t| {
-            let first = match &t.mixer.input {
-                soundcraft_model::Route::Hardware(h) => {
-                    h.trim_start_matches("In ").split(['-', ' ']).next().and_then(|n| n.parse::<usize>().ok()).map_or(0, |n| n.saturating_sub(1))
-                }
-                _ => 0,
-            };
-            let inputs = (0..t.channels()).map(|k| first.saturating_add(k)).collect();
+            let inputs = t.mixer.input.hardware_input_start().map_or_else(Vec::new, |first| {
+                (0..t.channels()).map(|k| first.saturating_add(k)).collect()
+            });
             let file = |n: usize| dir.join("Audio Files").join(format!("{}_{n:02}.wav", sanitize_name(&t.name)));
-            let path = (take_no..take_no + 1_000).map(file).find(|p| !p.exists()).unwrap_or_else(|| file(take_no));
+            let path = (take_no..take_no + 1_000).map(file).find(|p| !p.exists() && !reserved.contains(p)).unwrap_or_else(|| file(take_no));
+            reserved.insert(path.clone());
             (t.id, inputs, path)
         })
         .collect()
@@ -1427,6 +1422,30 @@ mod record_tests {
         bytes.extend((0..frames).flat_map(|i| (i as f32 / frames as f32 - 0.5).to_le_bytes()));
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn simultaneous_takes_reserve_distinct_sanitized_file_names() {
+        let mut e = Engine::default();
+        armed(&mut e, "Vox/A", "mono", "In 1");
+        armed(&mut e, "Vox:A", "mono", "In 2");
+        let dir = std::env::temp_dir().join(format!("soundcraft-take-names-{}", std::process::id()));
+        let plan = plan_takes(&e, &dir, 2);
+        assert_eq!(plan.len(), 2);
+        assert_ne!(plan[0].2, plan[1].2);
+    }
+
+    #[test]
+    fn nonphysical_routes_do_not_record_the_default_microphone() {
+        let mut e = Engine::default();
+        let id = armed(&mut e, "Input", "mono", "In 1");
+        let dir = std::env::temp_dir();
+        for input in ["none", "main", "Bus 1", "In 0", "In 4-3"] {
+            e.execute("track.input", &json!({"track": id.0, "input": input})).unwrap();
+            let plan = plan_takes(&e, &dir, 2);
+            assert_eq!(plan.len(), 1);
+            assert!(plan[0].1.is_empty(), "{input}");
+        }
     }
 
     #[test]

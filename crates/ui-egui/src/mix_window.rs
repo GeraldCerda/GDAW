@@ -135,7 +135,7 @@ pub(crate) fn route_name(app: &SoundApp, r: &Route) -> String {
 }
 
 pub(crate) fn input_name(app: &SoundApp, track: &Track) -> String {
-    if track.kind.has_playlist() && track.mixer.input == Route::None { "In 1".to_string() } else { route_name(app, &track.mixer.input) }
+    if track.mixer.input == Route::None { "no input".to_string() } else { route_name(app, &track.mixer.input) }
 }
 
 /// The input or output menu under `resp`. It closes only on a click outside, so its bus search
@@ -1243,8 +1243,8 @@ fn send_route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, cu
 fn route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, input: bool) {
     let key = if input { "input" } else { "output" };
     let cmd = if input { "track.input" } else { "track.output" };
-    if ui.button(if input { "Default (In 1)" } else { "no output" }).clicked() {
-        let _ = app.run(cmd, json!({"track": id.0, key: if input { "In 1" } else { "none" }}));
+    if ui.button(if input { "no input" } else { "no output" }).clicked() {
+        let _ = app.run(cmd, json!({"track": id.0, key: "none"}));
         ui.close();
     }
     let main_name = app.engine.session().outputs.first().map_or_else(|| "Out 1-2".to_string(), |o| o.name.clone());

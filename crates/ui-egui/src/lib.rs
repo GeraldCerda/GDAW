@@ -35,7 +35,7 @@ pub mod windows;
 
 use serde_json::{Value, json};
 use soundcraft_engine::{Engine, TransportRequest};
-use soundcraft_model::{Route, TrackId, TrackKind};
+use soundcraft_model::{TrackId, TrackKind};
 use soundcraft_playback::record::Trouble;
 use soundcraft_playback::{OutputTrouble, Player};
 use soundcraft_time::{Range, Samples};
@@ -596,9 +596,13 @@ impl SoundApp {
         if plan.is_empty() {
             return Err("no audio track is record-enabled".into());
         }
+        if let Some((track, _, _)) = plan.iter().find(|(_, inputs, _)| inputs.is_empty()) {
+            let name = self.engine.session().track(*track).map_or("Unknown", |t| t.name.as_str());
+            return Err(format!("{name} has no physical recording input. Assign an input in Setup > I/O or the Mix window; bus recording is not supported yet."));
+        }
         if let Some((track, inputs, _)) = plan.iter().find(|(_, inputs, _)| inputs.iter().any(|&channel| channel >= r.channels)) {
             let name = self.engine.session().track(*track).map_or("Unknown", |t| t.name.as_str());
-            let channels = inputs.iter().map(|channel| (channel + 1).to_string()).collect::<Vec<_>>().join(", ");
+            let channels = inputs.iter().map(|channel| channel.saturating_add(1).to_string()).collect::<Vec<_>>().join(", ");
             return Err(format!("Cannot record {name}: assigned input channel(s) {channels}, but the selected interface has {} input channel(s). Reassign the input in Setup > I/O or the Mix window.", r.channels));
         }
         let takes = plan
@@ -1058,6 +1062,13 @@ impl SoundApp {
                 TransportRequest::AllNotesOff => {}
             }
         }
+        let mut input_meters: std::collections::HashMap<_, _> = self.recorder.as_ref().map_or_else(std::collections::HashMap::new, |recorder| {
+            let peaks = recorder.take_input_peaks();
+            self.engine.session().tracks.iter()
+                .filter(|track| track.kind == TrackKind::Audio && !track.inactive && (track.mixer.record_arm || track.mixer.input_monitor))
+                .map(|track| (track.id, (input_meter_peak(track, &peaks), !track.mixer.input_monitor)))
+                .collect()
+        });
         // Read back the position.
         if let Some(p) = &self.player {
             let playing = p.is_playing();
@@ -1077,7 +1088,9 @@ impl SoundApp {
             let snap = &self.meter_snapshot;
             for (id, m) in &snap.tracks {
                 let d = self.meters.entry(*id).or_default();
-                feed_meter(d, m.peak, m.gain_reduction_db, dt);
+                let input = input_meters.remove(id);
+                let peak = input.filter(|(_, raw)| *raw).map_or(m.peak, |(peak, _)| peak);
+                feed_meter(d, peak, m.gain_reduction_db, dt);
                 if m.plugin_failures.count != d.plugin_failures {
                     d.plugin_failures = m.plugin_failures.count;
                     if let Some(msg) = failed_plugin_status(self.engine.session(), *id, m.plugin_failures.last) {
@@ -1104,23 +1117,8 @@ impl SoundApp {
                 self.stop_play();
             }
         }
-        if let Some(recorder) = &self.recorder {
-            let peaks = recorder.take_input_peaks();
-            let inputs: Vec<_> = self.engine.session().tracks.iter()
-                .filter(|track| track.kind == TrackKind::Audio && (track.mixer.record_arm || track.mixer.input_monitor))
-                .map(|track| {
-                    let first = match &track.mixer.input {
-                        Route::Hardware(input) => input.trim_start_matches("In ").split(['-', ' ']).next().and_then(|n| n.parse::<usize>().ok()).map_or(0, |n| n.saturating_sub(1)),
-                        _ => 0,
-                    };
-                    let left = peaks.get(first).copied().unwrap_or(0.0);
-                    let right = if track.channels() > 1 { peaks.get(first.saturating_add(1)).copied().unwrap_or(0.0) } else { left };
-                    (track.id, [left, right])
-                })
-                .collect();
-            for (id, peak) in inputs {
-                feed_meter(self.meters.entry(id).or_default(), peak, 0.0, dt);
-            }
+        for (id, (peak, _)) in input_meters {
+            feed_meter(self.meters.entry(id).or_default(), peak, 0.0, dt);
         }
         if !self.meters_live() {
             for d in self.meters.values_mut() {
@@ -1287,6 +1285,16 @@ impl SoundApp {
     }
 }
 
+fn input_meter_peak(track: &soundcraft_model::Track, peaks: &[f32]) -> [f32; 2] {
+    let Some(first) = track.mixer.input.hardware_input_start() else { return [0.0; 2] };
+    if first.checked_add(track.channels()).is_none_or(|end| end > peaks.len()) {
+        return [0.0; 2];
+    }
+    let left = peaks.get(first).copied().unwrap_or(0.0);
+    let right = if track.channels() > 1 { peaks.get(first.saturating_add(1)).copied().unwrap_or(0.0) } else { left };
+    [left, right]
+}
+
 fn feed_meter(d: &mut MeterDisplay, peak: [f32; 2], gr: f32, dt: f32) {
     // Instant attack, ~26 dB/s release, 2 s peak hold.
     let fall = 10f32.powf(-26.0 * dt / 20.0);
@@ -1325,8 +1333,9 @@ fn failed_plugin_status(s: &soundcraft_model::Session, track: TrackId, slot: usi
 
 #[cfg(test)]
 mod tests {
-    use super::{Services, SoundApp, automation_step_due};
+    use super::{Services, SoundApp, automation_step_due, input_meter_peak};
     use serde_json::json;
+    use soundcraft_model::{TrackId, TrackKind};
 
     #[test]
     fn new_session_stops_playback_and_the_old_clock() {
@@ -1375,6 +1384,18 @@ mod tests {
         app.handle_transport(0.25);
         assert!(!app.is_playing());
         assert_eq!(app.engine.transport.position, 0);
+    }
+
+    #[test]
+    fn input_meters_use_only_the_assigned_physical_channels() {
+        let mut track = soundcraft_model::Track::new(TrackId(1), "Input", TrackKind::Audio, soundcraft_model::ChannelFormat::Stereo, [0; 3]);
+        track.mixer.input = soundcraft_model::Route::Hardware("In 2-3".into());
+        assert_eq!(input_meter_peak(&track, &[0.9, 0.2, 0.4]), [0.2, 0.4]);
+        assert_eq!(input_meter_peak(&track, &[0.9, 0.2]), [0.0; 2]);
+        track.mixer.input = soundcraft_model::Route::None;
+        assert_eq!(input_meter_peak(&track, &[0.9, 0.2, 0.4]), [0.0; 2]);
+        track.mixer.input = soundcraft_model::Route::Bus(soundcraft_model::BusId(1));
+        assert_eq!(input_meter_peak(&track, &[0.9, 0.2, 0.4]), [0.0; 2]);
     }
 
     #[test]

@@ -420,6 +420,24 @@ pub enum Route {
     Hardware(String),
 }
 
+impl Route {
+    pub fn hardware_input_start(&self) -> Option<usize> {
+        let Route::Hardware(name) = self else { return None };
+        let (prefix, channels) = name.trim().split_once(' ')?;
+        if !prefix.eq_ignore_ascii_case("in") {
+            return None;
+        }
+        let (first, last) = channels.trim().split_once('-').map_or((channels.trim(), None), |(first, last)| (first.trim(), Some(last.trim())));
+        let first = first.parse::<usize>().ok()?;
+        if let Some(last) = last
+            && last.parse::<usize>().ok()? < first
+        {
+            return None;
+        }
+        first.checked_sub(1)
+    }
+}
+
 /// A plugin instance on an insert slot.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Insert {
@@ -621,6 +639,16 @@ pub fn fader_db_to_pos(db: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hardware_inputs_require_a_valid_one_based_path() {
+        for (path, expected) in [("In 1", Some(0)), ("In 3-4", Some(2)), (" in 2 ", Some(1)), ("In 0", None), ("In 4-3", None), ("In 2-x", None), ("Out 1-2", None), ("Mic", None)] {
+            assert_eq!(Route::Hardware(path.into()).hardware_input_start(), expected);
+        }
+        for route in [Route::None, Route::Main, Route::Bus(BusId(1))] {
+            assert_eq!(route.hardware_input_start(), None);
+        }
+    }
 
     #[test]
     fn insert_state_round_trips_through_json() {
