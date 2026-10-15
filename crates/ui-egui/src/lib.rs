@@ -659,6 +659,9 @@ impl SoundApp {
         let Some(p) = &self.player else { return };
         for (t, slot, param, value) in p.idle() {
             if slot == soundcraft_mix::INSTRUMENT_SLOT {
+                let _ = self.engine.execute_merged("mix.instrument_param",
+                    &json!({"track":t.0,"param":param,"value":value}),
+                    &format!("instrument:{}:{param}",t.0));
                 continue;
             }
             if let Some((note, index)) = soundcraft_mix::decode_drum_pad_slot(slot) {

@@ -217,10 +217,11 @@ impl AudioState {
                 Cmd::Recording(r) => self.recording = r,
                 Cmd::Audition(track, note) => {
                     self.mix.monitor_only = !self.playing;
+                    let previous = if self.mix.audition_track == Some(track) { self.audition_frames } else { 0 };
                     let frames = self.mix.audition(&self.session, track, note);
                     let speed = f64::from(self.shared.speed.load(Ordering::Relaxed)) / 1000.0;
                     let step = self.session.sample_rate.as_f64() / self.device_rate.max(1.0) * speed.clamp(0.1, 4.0);
-                    self.audition_frames = (frames as f64 / step).ceil().min(usize::MAX as f64) as usize;
+                    self.audition_frames = ((frames as f64 / step).ceil().min(usize::MAX as f64) as usize).max(previous);
                     if !self.playing {
                         self.pending_len = 0;
                         self.read = 0.0;
@@ -1377,5 +1378,46 @@ mod audition_transport_tests {
         state.drain();
         assert_eq!(state.audition_frames, 0);
         assert!(state.mix.audition_track.is_none());
+    }
+}
+
+#[cfg(test)]
+mod long_preview_lifetime_tests {
+    use super::*;
+
+    #[test]
+    fn tuned_previews_follow_the_device_rate_and_short_hits_do_not_cut_off_long_hits() {
+        let mut session = Session::default();
+        let track = session.add_track(soundcraft_model::TrackKind::Instrument, soundcraft_model::ChannelFormat::Stereo, None);
+        let long = soundcraft_model::SourceId(800);
+        let short = soundcraft_model::SourceId(801);
+        session.pool.insert(long, Arc::new(soundcraft_model::SourceAudio::new(soundcraft_audio_io::AudioBuffer {
+            sample_rate:24_000, channels:vec![vec![0.25;72_000]],
+        })));
+        session.pool.insert(short, Arc::new(soundcraft_model::SourceAudio::new(soundcraft_audio_io::AudioBuffer {
+            sample_rate:48_000, channels:vec![vec![0.25;4800]],
+        })));
+        let mut rack = soundcraft_model::Insert::new("drum_rack");
+        rack.pad_samples.insert(36,long);
+        rack.pad_samples.insert(37,short);
+        rack.params.insert("pad36.tune".into(),-12.0);
+        session.track_mut(track).unwrap().instrument=Some(rack);
+        let shared=Arc::new(Shared {
+            position:AtomicI64::new(0), playing:AtomicBool::new(false), auditioning:AtomicBool::new(false),
+            speed:AtomicU32::new(1000), meters:Mutex::new(MeterSnapshot::default()),
+        });
+        let (sender,receiver)=channel();
+        let mut state=AudioState::new(receiver,shared.clone(),Arc::new(session),44_100.0,channel().0);
+        sender.send(Cmd::Audition(track,36)).unwrap();
+        state.drain();
+        assert_eq!(state.audition_frames,264_600);
+        assert!(shared.auditioning.load(Ordering::Relaxed));
+        state.audition_frames=44_100;
+        sender.send(Cmd::Audition(track,37)).unwrap();
+        state.drain();
+        assert_eq!(state.audition_frames,44_100);
+        sender.send(Cmd::Stop).unwrap();
+        state.drain();
+        assert!(!shared.auditioning.load(Ordering::Relaxed));
     }
 }

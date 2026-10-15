@@ -669,10 +669,11 @@ impl MixEngine {
         }
         frames = frames.saturating_add(strip.pad_effects.tail(instrument, note));
         slot.plugin.note_on(0, note, 127);
-        for (effect, insert) in strip.plugins.iter().zip(&model.mixer.inserts) {
+        for (index, (effect, insert)) in strip.plugins.iter_mut().zip(&model.mixer.inserts).enumerate() {
             if let (Some(effect), Some(insert)) = (effect, insert)
-                && insert.active && !insert.bypass
+                && insert.active && !insert.bypass && !effect.failed
             {
+                apply_params(effect, insert, model, index, 0);
                 frames = frames.saturating_add(effect.plugin.tail_samples());
             }
         }
