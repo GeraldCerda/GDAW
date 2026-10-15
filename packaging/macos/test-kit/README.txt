@@ -1,16 +1,16 @@
 GDAW Mac Test Kit v4
 
-Source revision: 3a232504ba7ea62f31d0e397a729fe6eb7571e9e
+Source revision: e1d692457d1ae0050e3f5fb3e9fda1472552cf54
 Repository: https://github.com/GeraldCerda/GDAW
 
 This kit downloads pinned source from GeraldCerda/GDAW and builds it on your Mac. No DAW binary, installer or source ZIP was built while preparing these changes. Existing v3 folders and Cargo caches remain usable with the updated build_test.sh.
 
 Run the regression suites before installing this pass:
-bash "$HOME/Downloads/GDAW_Mac_Test_Kit_v3/build_test.sh" --verify
+bash "$HOME/Downloads/GDAW_Test_Kit/build_test.sh" --verify
 
 Use the actual kit folder shown in your build log. After the other suites have passed and only UI changes follow, --verify-ui runs the UI crate's tests before building and installing. It does not rerun DSP, model, engine, mix or playback suites. The full --verify option remains available. Formatting differences are saved separately under logs/format-<source revision>.log.
 
-Use the actual kit folder if yours is named v4. The verification option checks formatting, then runs the DSP, model, engine, mix, playback and UI tests. A test failure stops before installation. Formatting failures are reported; compilation and regression checks still follow. Running without --verify compiles and installs without running those tests.
+Use the actual kit folder shown in your build log. The verification option checks formatting, then runs the DSP, model, engine, mix, playback and UI tests. All selected test binaries run even when an earlier binary fails, so one log reports the remaining failures. Any test failure stops before installation. Formatting failures are reported; compilation and regression checks still follow. Running without --verify compiles and installs without running those tests.
 
 The script checks Apple Command Line Tools, installs or updates Rust, downloads this source revision, builds the Mac application and signs it locally. GDAW Test.app goes to ~/Applications. Previous copies are retained as timestamped backups. The existing launch_test.sh keeps settings in ~/Library/Application Support/GDAW Test. Logs remain in the kit's logs folder.
 

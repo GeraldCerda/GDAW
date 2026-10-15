@@ -15,7 +15,7 @@ if [ "$(uname -s)" != "Darwin" ]; then
     exit 2
 fi
 
-commit="3a232504ba7ea62f31d0e397a729fe6eb7571e9e"
+commit="e1d692457d1ae0050e3f5fb3e9fda1472552cf54"
 mkdir -p "$kit_dir/logs"
 build_log="$kit_dir/logs/build-$(date +%Y%m%d-%H%M%S).log"
 exec > >(tee -a "$build_log") 2>&1
@@ -74,9 +74,9 @@ if [ "$verify" != "0" ]; then
         printf 'Formatting differences recorded in %s; continuing to compile and run the regression suites.\n' "$format_log"
     fi
     if [ "$verify" = "2" ]; then
-        cargo +stable test --locked --release --target "$target" -p soundcraft-ui-egui
+        cargo +stable test --no-fail-fast --locked --release --target "$target" -p soundcraft-ui-egui
     else
-        cargo +stable test --locked --release --target "$target" -p soundcraft-dsp -p soundcraft-model -p soundcraft-engine -p soundcraft-mix -p soundcraft-playback -p soundcraft-ui-egui
+        cargo +stable test --no-fail-fast --locked --release --target "$target" -p soundcraft-dsp -p soundcraft-model -p soundcraft-engine -p soundcraft-mix -p soundcraft-playback -p soundcraft-ui-egui
     fi
 fi
 
