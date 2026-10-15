@@ -617,15 +617,33 @@ impl MixEngine {
     }
 
     /// Render `frames` (≤ max_block) samples starting at `pos` into `out` (≥ 2 channels).
-    pub fn audition(&mut self, session: &Session, track: TrackId, note: u8) {
+    pub fn audition(&mut self, session: &Session, track: TrackId, note: u8) -> usize {
         if self.monitor_only && self.audition_track.is_some_and(|previous| previous != track) {
             self.end_audition();
         }
         self.ensure_synced(session);
-        if let Some(slot) = self.strips.get_mut(&track).and_then(|strip| strip.instrument.as_mut()) {
-            slot.plugin.note_on(0, note, 127);
-            self.audition_track = Some(track);
+        let Some(model) = session.track(track) else { return 0 };
+        let Some(instrument) = model.instrument.as_ref() else { return 0 };
+        if !instrument.active || instrument.bypass {
+            return 0;
         }
+        let Some(strip) = self.strips.get_mut(&track) else { return 0 };
+        let Some(slot) = strip.instrument.as_mut() else { return 0 };
+        apply_params(slot, instrument, model, INSTRUMENT_SLOT, 0);
+        let mut frames = slot.plugin.note_tail_samples(note);
+        if instrument.plugin != "drum_rack" {
+            frames = frames.max((session.sample_rate.as_f64() * 2.0) as usize);
+        }
+        slot.plugin.note_on(0, note, 127);
+        for (effect, insert) in strip.plugins.iter().zip(&model.mixer.inserts) {
+            if let (Some(effect), Some(insert)) = (effect, insert)
+                && insert.active && !insert.bypass
+            {
+                frames = frames.saturating_add(effect.plugin.tail_samples());
+            }
+        }
+        self.audition_track = Some(track);
+        frames.max(self.max_block)
     }
 
     pub fn end_audition(&mut self) {
@@ -3394,5 +3412,29 @@ mod drum_audition_tests {
         mixer.audition(&session, second, 36);
         mixer.render(&session, 128, 128, &mut audio);
         assert!(peak(&audio) > initial * 1.8);
+    }
+}
+
+#[cfg(test)]
+mod long_pad_preview_tests {
+    use super::*;
+
+    #[test]
+    fn preview_uses_the_selected_pad_and_applies_its_current_tuning_before_measuring() {
+        let mut session = Session::default();
+        let source = soundcraft_model::SourceId(900);
+        session.pool.insert(source, Arc::new(SourceAudio::new(soundcraft_audio_io::AudioBuffer {
+            sample_rate: 24_000, channels: vec![vec![0.25; 96_000]],
+        })));
+        let track = session.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
+        let mut instrument = soundcraft_model::Insert::new("drum_rack");
+        instrument.pad_samples.insert(36, source);
+        instrument.params.insert("pad36.tune".into(), -12.0);
+        session.track_mut(track).unwrap().instrument = Some(instrument);
+        let mut mixer = MixEngine::new(session.sample_rate.as_f64() as f32, 128);
+        mixer.monitor_only = true;
+        let frames = mixer.audition(&session, track, 36);
+        assert_eq!(frames, (session.sample_rate.as_f64() * 8.0) as usize);
+        assert_eq!(mixer.audition(&session, track, 37), 128);
     }
 }

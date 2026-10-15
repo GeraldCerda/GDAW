@@ -209,6 +209,9 @@ pub trait Plugin: Send {
     fn tail_samples(&self) -> usize {
         0
     }
+    fn note_tail_samples(&self, _note: u8) -> usize {
+        self.tail_samples()
+    }
     /// Gain reduction in dB for metering (a non-negative amount); 0 for non-dynamics plugins.
     fn gain_reduction_db(&self) -> f32 {
         0.0

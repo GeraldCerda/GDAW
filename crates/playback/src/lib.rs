@@ -78,6 +78,7 @@ enum Cmd {
 struct Shared {
     position: AtomicI64,
     playing: AtomicBool,
+    auditioning: AtomicBool,
     /// Speed × 1000.
     speed: AtomicU32,
     meters: Mutex<MeterSnapshot>,
@@ -216,8 +217,10 @@ impl AudioState {
                 Cmd::Recording(r) => self.recording = r,
                 Cmd::Audition(track, note) => {
                     self.mix.monitor_only = !self.playing;
-                    self.mix.audition(&self.session, track, note);
-                    self.audition_frames = (self.device_rate.max(1.0) * 2.0) as usize;
+                    let frames = self.mix.audition(&self.session, track, note);
+                    let speed = f64::from(self.shared.speed.load(Ordering::Relaxed)) / 1000.0;
+                    let step = self.session.sample_rate.as_f64() / self.device_rate.max(1.0) * speed.clamp(0.1, 4.0);
+                    self.audition_frames = (frames as f64 / step).ceil().min(usize::MAX as f64) as usize;
                     if !self.playing {
                         self.pending_len = 0;
                         self.read = 0.0;
@@ -277,6 +280,7 @@ impl AudioState {
         }
         self.send_garbage();
         self.shared.playing.store(self.playing, Ordering::Relaxed);
+        self.shared.auditioning.store(self.audition_frames > 0, Ordering::Relaxed);
     }
 
     fn send_garbage(&mut self) {
@@ -407,6 +411,7 @@ impl AudioState {
             if self.audition_frames > 0 {
                 self.audition_frames -= 1;
                 if self.audition_frames == 0 {
+                    self.shared.auditioning.store(false, Ordering::Relaxed);
                     if self.playing {
                         self.mix.audition_track = None;
                     } else {
@@ -529,7 +534,7 @@ impl Player {
     fn open(session: Arc<Session>, cfg: &AudioConfig) -> Player {
         let shared = Arc::new(Shared {
             position: AtomicI64::new(0),
-            playing: AtomicBool::new(false),
+            playing: AtomicBool::new(false), auditioning: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
             meters: Mutex::new(MeterSnapshot::default()),
         });
@@ -799,6 +804,10 @@ impl Player {
         self.shared.playing.load(Ordering::Relaxed)
     }
 
+    pub fn is_auditioning(&self) -> bool {
+        self.shared.auditioning.load(Ordering::Relaxed)
+    }
+
     pub fn meters(&self) -> MeterSnapshot {
         self.shared.meters.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
@@ -1015,7 +1024,7 @@ mod tests {
     fn a_block_that_panics_goes_silent_and_is_reported_once() {
         let shared = Shared {
             position: AtomicI64::new(0),
-            playing: AtomicBool::new(true),
+            playing: AtomicBool::new(true), auditioning: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
             meters: Mutex::new(MeterSnapshot::default()),
         };
@@ -1056,7 +1065,7 @@ mod tests {
         let s = Arc::new(soundcraft_model::Session::default());
         let shared = Arc::new(Shared {
             position: AtomicI64::new(0),
-            playing: AtomicBool::new(false),
+            playing: AtomicBool::new(false), auditioning: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
             meters: Mutex::new(MeterSnapshot::default()),
         });
@@ -1074,7 +1083,7 @@ mod tests {
         let s = Arc::new(soundcraft_model::Session::default());
         let shared = Arc::new(Shared {
             position: AtomicI64::new(0),
-            playing: AtomicBool::new(false),
+            playing: AtomicBool::new(false), auditioning: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
             meters: Mutex::new(MeterSnapshot::default()),
         });
@@ -1099,7 +1108,7 @@ mod tests {
         let s = Arc::new(s);
         let shared = Arc::new(Shared {
             position: AtomicI64::new(0),
-            playing: AtomicBool::new(false),
+            playing: AtomicBool::new(false), auditioning: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
             meters: Mutex::new(MeterSnapshot::default()),
         });
@@ -1132,7 +1141,7 @@ mod tests {
         let s = Arc::new(s);
         let shared = Arc::new(Shared {
             position: AtomicI64::new(0),
-            playing: AtomicBool::new(false),
+            playing: AtomicBool::new(false), auditioning: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
             meters: Mutex::new(MeterSnapshot::default()),
         });
@@ -1224,7 +1233,7 @@ mod tests {
     fn replaced_sessions_are_freed_on_the_ui_thread() {
         let shared = Arc::new(Shared {
             position: AtomicI64::new(0),
-            playing: AtomicBool::new(false),
+            playing: AtomicBool::new(false), auditioning: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
             meters: Mutex::new(MeterSnapshot::default()),
         });
@@ -1253,7 +1262,7 @@ mod tests {
         let s = Arc::new(soundcraft_model::Session::default());
         let shared = Arc::new(Shared {
             position: AtomicI64::new(0),
-            playing: AtomicBool::new(false),
+            playing: AtomicBool::new(false), auditioning: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
             meters: Mutex::new(MeterSnapshot::default()),
         });
@@ -1288,7 +1297,7 @@ mod tests {
             tr.mixer.inserts[0] = Some(ins);
             let shared = Arc::new(Shared {
                 position: AtomicI64::new(0),
-                playing: AtomicBool::new(false),
+                playing: AtomicBool::new(false), auditioning: AtomicBool::new(false),
                 speed: AtomicU32::new(1000),
                 meters: Mutex::new(MeterSnapshot::default()),
             });
@@ -1319,7 +1328,7 @@ mod tests {
         s.track_mut(t).unwrap().mixer.input_monitor = true;
         let shared = Arc::new(Shared {
             position: AtomicI64::new(0),
-            playing: AtomicBool::new(false),
+            playing: AtomicBool::new(false), auditioning: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
             meters: Mutex::new(MeterSnapshot::default()),
         });
@@ -1348,7 +1357,7 @@ mod audition_transport_tests {
         let track = session.add_track(soundcraft_model::TrackKind::Instrument, soundcraft_model::ChannelFormat::Stereo, None);
         session.track_mut(track).unwrap().instrument = Some(soundcraft_model::Insert::new("drum_rack"));
         let shared = Arc::new(Shared {
-            position: AtomicI64::new(0), playing: AtomicBool::new(false), speed: AtomicU32::new(1000),
+            position: AtomicI64::new(0), playing: AtomicBool::new(false), auditioning: AtomicBool::new(false), speed: AtomicU32::new(1000),
             meters: Mutex::new(MeterSnapshot::default()),
         });
         let (sender, receiver) = channel();

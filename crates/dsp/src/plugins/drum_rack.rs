@@ -192,6 +192,10 @@ impl Plugin for DrumRack {
         }
     }
 
+    fn note_tail_samples(&self, note: u8) -> usize {
+        Self::pad_index(note).and_then(|index| self.pads.get(index)).map_or(0, |pad| pad.note_tail_samples(note))
+    }
+
     fn tail_samples(&self) -> usize {
         self.pads.iter().map(|pad| pad.tail_samples()).max().unwrap_or(0)
     }

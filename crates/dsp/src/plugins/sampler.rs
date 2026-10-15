@@ -411,10 +411,25 @@ impl Plugin for Sampler {
         }
     }
 
+    fn note_tail_samples(&self, note: u8) -> usize {
+        let note = note.min(127);
+        if self.len == 0 || note < self.d.keys.0 || note > self.d.keys.1 {
+            return 0;
+        }
+        let semis = if self.d.key_track { f64::from(note) - self.d.root } else { 0.0 } + self.d.offset;
+        let step = (f64::from(self.sample_sr) / f64::from(self.sr) * 2f64.powf(semis / 12.0)).min(MAX_STEP);
+        if !step.is_finite() || step <= 0.0 {
+            return 0;
+        }
+        let start = self.d.start * self.len.saturating_sub(1) as f64;
+        let frames = ((self.len as f64 - start) / step).ceil();
+        frames.clamp(0.0, 1.0e9) as usize
+    }
+
     fn tail_samples(&self) -> usize {
         let release = ms_to_samples(self.p.v(RELEASE), self.sr);
         // A one-shot keeps playing its sample after the note ends.
-        let rest = if self.d.one_shot { self.len as f32 * self.sr / self.sample_sr } else { 0.0 };
+        let rest = if self.d.one_shot { self.note_tail_samples(self.d.keys.0) as f32 } else { 0.0 };
         let t = release + rest;
         if t.is_finite() { t.min(1.0e9) as usize } else { 0 }
     }
@@ -842,5 +857,29 @@ mod sample_replacement_tests {
         sampler.set_sample(None);
         sampler.process(&mut audio, 128);
         assert!(audio.iter().flatten().all(|sample| sample.abs() < 1e-6));
+    }
+}
+
+#[cfg(test)]
+mod audition_length_tests {
+    use super::*;
+    use crate::SampleBuffer;
+
+    #[test]
+    fn audition_length_follows_rate_pitch_start_and_empty_samples() {
+        let mut sampler = Sampler::new();
+        sampler.prepare(48_000.0, 128, 2);
+        sampler.set_param("key_track", 0.0);
+        assert_eq!(sampler.note_tail_samples(36), 0);
+        sampler.set_sample(Some(Arc::new(SampleBuffer {
+            sample_rate: 24_000.0, channels: vec![vec![0.25; 72_000]],
+        })));
+        assert_eq!(sampler.note_tail_samples(36), 144_000);
+        sampler.set_param("transpose", -12.0);
+        assert_eq!(sampler.note_tail_samples(36), 288_000);
+        sampler.set_param("transpose", 12.0);
+        assert_eq!(sampler.note_tail_samples(36), 72_000);
+        sampler.set_param("start", 50.0);
+        assert_eq!(sampler.note_tail_samples(36), 36_001);
     }
 }

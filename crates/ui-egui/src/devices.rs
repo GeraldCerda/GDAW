@@ -27,7 +27,6 @@ pub struct BrowserState {
     pub auto_kits: std::collections::BTreeSet<TrackId>,
     pub files: Vec<(String, PathBuf, bool)>,
     pub pad: u8,
-    pub preview_started: Option<std::time::Instant>,
 }
 
 impl Default for BrowserState {
@@ -47,7 +46,6 @@ impl Default for BrowserState {
             auto_kits: std::collections::BTreeSet::new(),
             files: Vec::new(),
             pad: 36,
-            preview_started: None,
         }
     }
 }
@@ -374,7 +372,6 @@ fn rack(app: &mut SoundApp, ui: &mut Ui, track: TrackId, insert: &Insert) {
                             app.browser.pad = note;
                             if insert.pad_samples.contains_key(&note) {
                                 let _ = app.run("mix.drum_pad_audition", json!({"track": track.0, "note": note}));
-                                app.browser.preview_started = Some(std::time::Instant::now());
                             }
                         }
                         if let Some(item) = response.dnd_release_payload::<BrowserItem>() {

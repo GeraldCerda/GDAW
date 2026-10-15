@@ -798,7 +798,7 @@ impl SoundApp {
 
     fn meters_live(&self) -> bool {
         self.engine.transport.playing
-            || self.browser.preview_started.is_some_and(|started| started.elapsed().as_secs_f32() < 2.0)
+            || self.player.as_ref().is_some_and(|player| player.is_auditioning())
             || (self.recorder.is_some() && self.engine.session().tracks.iter().any(physical_input_track))
     }
 
