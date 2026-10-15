@@ -533,7 +533,9 @@ mod tests {
     #[test]
     fn theme_command_sets_and_reports_the_mode() {
         let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
-        assert_eq!(app.run("ui.theme", json!({})), Ok(json!({"mode": "dark"})));
+        assert_eq!(app.run("ui.theme", json!({})), Ok(json!({"mode": "light"})));
+        assert_eq!(app.run("ui.theme", json!({"mode": "dark"})), Ok(json!({"mode": "dark"})));
+        assert_eq!(app.ui.theme, ThemeMode::Dark);
         assert_eq!(app.run("ui.theme", json!({"mode": "light"})), Ok(json!({"mode": "light"})));
         assert_eq!(app.ui.theme, ThemeMode::Light);
         assert!(app.run("ui.theme", json!({"mode": "sepia"})).is_err());
@@ -588,7 +590,7 @@ mod tests {
         for initial in [Some(egui::Theme::Light), Some(egui::Theme::Dark), None] {
             let ctx = egui::Context::default();
             let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
-            app.ui = serde_json::from_value(json!({"theme": "system"})).unwrap();
+            app.ui = serde_json::from_value(json!({"theme": "system", "appearance_revision": 1})).unwrap();
             frame(&mut app, &ctx, initial, initial == Some(egui::Theme::Light));
         }
 
@@ -616,4 +618,30 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn legacy_appearance_migrates_once_and_later_choices_survive_frames_and_reload() {
+        let _palette = lock_test_palette();
+        let ctx = egui::Context::default();
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        app.ui = serde_json::from_value(json!({"theme": "dark"})).unwrap();
+        assert_eq!(app.ui.appearance_revision, 0);
+        let mut output = ctx.run_ui(egui::RawInput { system_theme: Some(egui::Theme::Dark), ..Default::default() }, |ui| {
+            app.logic(ui.ctx());
+        });
+        output.textures_delta.clear();
+        assert_eq!(app.ui.theme, ThemeMode::Light);
+        assert_eq!(app.ui.appearance_revision, 1);
+        for mode in [ThemeMode::System, ThemeMode::Dark] {
+            app.run("ui.theme", json!({"mode": mode.id()})).unwrap();
+            app.ui = serde_json::from_value(serde_json::to_value(&app.ui).unwrap()).unwrap();
+            let mut output = ctx.run_ui(egui::RawInput { system_theme: Some(egui::Theme::Light), ..Default::default() }, |ui| {
+                app.logic(ui.ctx());
+            });
+            output.textures_delta.clear();
+            assert_eq!(app.ui.theme, mode);
+            assert_eq!(app.ui.appearance_revision, 1);
+            assert_eq!(is_light(), mode == ThemeMode::System);
+        }
+    }
+
 }

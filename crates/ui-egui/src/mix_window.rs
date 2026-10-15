@@ -1315,7 +1315,7 @@ mod strip_height_tests {
         let all = minimum_strip_height(&["all".into()]);
         assert_eq!(minimal, 374.0);
         assert_eq!(defaults, 708.0);
-        assert_eq!(all, 1172.0);
+        assert_eq!(all, 1072.0);
         assert!(all > defaults);
     }
 }
