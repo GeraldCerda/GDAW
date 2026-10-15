@@ -783,6 +783,7 @@ impl MenuSearch {
         let opened = kept.is_none();
         let (mut text, mut highlight, _) = kept.unwrap_or_default();
         let field = ui.add(egui::TextEdit::singleline(&mut text).id(id.with("field")).hint_text(hint).return_key(None));
+        ui.ctx().accesskit_node_builder(field.id, |node| node.set_label(hint));
         if opened {
             field.request_focus();
         }

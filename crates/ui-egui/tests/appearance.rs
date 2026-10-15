@@ -30,7 +30,7 @@ fn interface_scale_slider_follows_the_pointer() {
         app,
     );
     h.run_steps(6);
-    let rail = h.get_by_role(Role::Slider).rect();
+    let rail = h.get_by_role_and_label(Role::Slider, "Interface scale").rect();
     let start = pos2(rail.left() + rail.width() / 3.0, rail.center().y);
     let end = pos2(rail.right() + 40.0, rail.center().y);
     frame(&mut h, start, Some(true));

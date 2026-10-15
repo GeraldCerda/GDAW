@@ -154,8 +154,8 @@ fn ui_customization(app: &mut SoundApp, ctx: &egui::Context) {
         ctx,
         |ui| {
             egui::Grid::new("ui_custom").num_columns(2).spacing(vec2(12.0, 8.0)).show(ui, |ui| {
-                ui.label("Interface scale");
-                ui.add(egui::Slider::new(&mut app.extra.ui_scale, 0.75..=1.5).step_by(0.05).custom_formatter(|v, _| format!("{:.0} %", v * 100.0)));
+                let label = ui.label("Interface scale");
+                ui.add(egui::Slider::new(&mut app.extra.ui_scale, 0.75..=1.5).step_by(0.05).custom_formatter(|v, _| format!("{:.0} %", v * 100.0))).labelled_by(label.id);
                 ui.end_row();
                 ui.label("Reduce motion");
                 crate::widgets::checkbox(ui, &mut app.extra.reduce_motion, "");

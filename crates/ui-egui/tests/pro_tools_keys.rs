@@ -34,8 +34,8 @@ fn start(app: &SoundApp) -> i64 {
 }
 
 #[test]
-fn shift_equals_and_minus_step_the_grid_value_and_with_alt_the_nudge_value() {
-    for (os, _) in OSES {
+fn non_mac_row_keys_step_the_grid_and_nudge_values() {
+    for os in [OperatingSystem::Windows, OperatingSystem::Nix] {
         let (ctx, mut app) = rig(os);
         app.run("view.grid", json!({"value": "1/16"})).unwrap();
         app.run("view.nudge", json!({"value": "1/16"})).unwrap();
@@ -43,7 +43,7 @@ fn shift_equals_and_minus_step_the_grid_value_and_with_alt_the_nudge_value() {
         press(&ctx, &mut app, Key::Plus, Modifiers::SHIFT);
         press(&ctx, &mut app, Key::Minus, Modifiers::SHIFT);
         press(&ctx, &mut app, Key::Minus, Modifiers::SHIFT);
-        let up = if os == OperatingSystem::Mac { Key::Equals } else { Key::Plus };
+        let up = Key::Plus;
         press(&ctx, &mut app, up, ALT_SHIFT);
         press(&ctx, &mut app, up, ALT_SHIFT);
         press(&ctx, &mut app, Key::Minus, ALT_SHIFT);
@@ -53,6 +53,45 @@ fn shift_equals_and_minus_step_the_grid_value_and_with_alt_the_nudge_value() {
         press(&ctx, &mut app, Key::Plus, Modifiers::NONE);
         assert!(start(&app) > 48_000, "{os:?}");
     }
+}
+
+fn press_keypad(ctx: &egui::Context, app: &mut SoundApp, key: Key, modifiers: Modifiers) {
+    let events = [true, false]
+        .map(|pressed| Event::Key { key: Key::F35, physical_key: Some(key), pressed, repeat: false, modifiers })
+        .to_vec();
+    let mut raw = RawInput { events, ..Default::default() };
+    app.native_keypad_input(ctx, &mut raw);
+    ctx.run_ui(raw, |ui| shortcuts::handle(app, ui.ctx())).textures_delta.clear();
+}
+
+#[test]
+fn mac_keypad_steps_grid_and_nudge_without_repurposing_row_keys() {
+    let (ctx, mut app) = rig(OperatingSystem::Mac);
+    app.run("view.grid", json!({"value": "1/16"})).unwrap();
+    app.run("view.nudge", json!({"value": "1/16"})).unwrap();
+    app.run("edit.select", json!({"tracks": ["Kick"], "start": 48_000, "end": 96_000})).unwrap();
+    press(&ctx, &mut app, Key::Plus, Modifiers::SHIFT);
+    press(&ctx, &mut app, Key::Equals, ALT_SHIFT);
+    press(&ctx, &mut app, Key::Plus, Modifiers::NONE);
+    let edit = &app.engine.session().edit;
+    assert_eq!((edit.grid.label(), edit.nudge.label()), ("1/16 note".to_string(), "1/16 note".to_string()));
+    assert_eq!(start(&app), 48_000);
+
+    let grid = Modifiers { ctrl: true, alt: true, ..Modifiers::NONE };
+    let nudge = Modifiers { alt: true, ..MAC_CMD };
+    for key in [Key::Plus, Key::Minus, Key::Minus] {
+        press_keypad(&ctx, &mut app, key, grid);
+    }
+    for key in [Key::Plus, Key::Plus, Key::Minus] {
+        press_keypad(&ctx, &mut app, key, nudge);
+    }
+    let edit = &app.engine.session().edit;
+    assert_eq!((edit.grid.label(), edit.nudge.label()), ("1/32 note".to_string(), "1/8 note".to_string()));
+    assert_eq!(start(&app), 48_000);
+    press_keypad(&ctx, &mut app, Key::Plus, Modifiers::NONE);
+    assert!(start(&app) > 48_000);
+    press_keypad(&ctx, &mut app, Key::Minus, Modifiers::NONE);
+    assert_eq!(start(&app), 48_000);
 }
 
 #[test]

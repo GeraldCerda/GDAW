@@ -62,7 +62,7 @@ fn an_insert_menu_searches_as_soon_as_it_opens() {
     assert!(h.query_by_label(reverbs[0].name).is_some(), "typing went to the search");
     assert!(h.query_by_label_contains("Dynamics").is_none(), "the matches replace the categories");
 
-    h.get_by_role(Role::TextInput).click();
+    h.get_by_role_and_label(Role::TextInput, "Search plugins…").click();
     h.run_steps(3);
     assert!(h.query_by_label(reverbs[0].name).is_some(), "a click in the field keeps the menu open");
 
