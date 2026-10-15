@@ -58,6 +58,8 @@ fn process(e: &mut Engine, p: &Value) -> Result<Value> {
         _ => usize::MAX,
     };
     let mut done = 0;
+    let mut staged = e.session().clone();
+    let mut media = Vec::new();
     for id in ids {
         let Some((track, clip)) = e.session().find_clip(id).map(|(t, c)| (t, c.clone())) else { continue };
         if !clip.is_audio() {
@@ -112,8 +114,9 @@ fn process(e: &mut Engine, p: &Value) -> Result<Value> {
         }
         let buf = AudioBuffer { sample_rate: sr.hz(), channels: out };
         let new_name = format!("{}-{}", clip.name, short(&name));
-        let s = e.session_mut();
+        let s = &mut staged;
         let src = crate::io::add_source(s, &new_name, buf, None, FileFormat::Wav);
+        media.push(src);
         let mut nc: Clip = clip.clone();
         nc.name = new_name;
         nc.content = ClipContent::Audio { source: src, offset: 0 };
@@ -133,6 +136,8 @@ fn process(e: &mut Engine, p: &Value) -> Result<Value> {
             done += 1;
         }
     }
+    crate::io::persist_processed(e.session(), &mut staged, &media)?;
+    if done > 0 { *e.session_mut() = staged; }
     Ok(json!({"processed": done, "process": name}))
 }
 
@@ -146,6 +151,8 @@ fn generate(e: &mut Engine, p: &Value, name: &str, params: &[(String, f32)], r: 
         crate::io::refuse_longer(e.session(), "audiosuite.process", &t.name, "generate on", r.len(), crate::io::render_limit(t.channels()))?;
     }
     let mut clips = Vec::new();
+    let mut staged = e.session().clone();
+    let mut media = Vec::new();
     for track in tracks {
         let Some(t) = e.session().track(track).filter(|t| t.kind == TrackKind::Audio) else { continue };
         let channels = t.channels().max(1);
@@ -153,8 +160,9 @@ fn generate(e: &mut Engine, p: &Value, name: &str, params: &[(String, f32)], r: 
         let clip_name = format!("{}-{}", t.name, short(name));
         let mut audio = vec![vec![0.0; frames]; channels];
         apply(name, params, &mut audio, sr.as_f64() as f32)?;
-        let s = e.session_mut();
+        let s = &mut staged;
         let src = crate::io::add_source(s, &clip_name, AudioBuffer { sample_rate: sr.hz(), channels: audio }, None, FileFormat::Wav);
+        media.push(src);
         let id = s.new_clip_id();
         crate::edit::place_clip(s, track, Clip::audio(id, &clip_name, src, 0, r.start, i64::try_from(frames).unwrap_or(0)));
         clips.push(id.0);
@@ -162,6 +170,8 @@ fn generate(e: &mut Engine, p: &Value, name: &str, params: &[(String, f32)], r: 
     if clips.is_empty() {
         return Err(bad("audiosuite.process", "select an audio track to generate on"));
     }
+    crate::io::persist_processed(e.session(), &mut staged, &media)?;
+    *e.session_mut() = staged;
     Ok(json!({"processed": clips.len(), "process": name, "clips": clips}))
 }
 
@@ -277,4 +287,5 @@ mod tests {
         assert_eq!(ranges, vec![(0, 32), (32, 64)]);
     }
 }
+
 

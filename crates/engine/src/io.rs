@@ -74,6 +74,61 @@ pub(crate) fn write_path(path: impl AsRef<Path>, bytes: impl AsRef<[u8]>) -> Res
     std::fs::write(path, bytes).map_err(|err| EngineError::Io(format!("{}: {err}", path.display())))
 }
 
+pub(crate) fn persist_processed(before: &Session, staged: &mut Session, sources: &[SourceId]) -> Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    if sources.is_empty() { return Ok(()); }
+    let root = staged.folder.clone().unwrap_or_else(|| std::env::temp_dir().join("GDAW Unsaved Media"));
+    let parent = root.join("Audio Files");
+    make_dir(&parent)?;
+    let parent = std::fs::canonicalize(&parent).map_err(|error| EngineError::Io(error.to_string()))?;
+    let directory = (0..1024).find_map(|_| {
+        let path = parent.join(format!("AudioSuite-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+        if crate::file_access::check_write(&path).is_err() { return None; }
+        std::fs::create_dir(&path).ok().map(|()| path)
+    }).ok_or_else(|| EngineError::Io("cannot reserve an AudioSuite transaction directory".into()))?;
+    let mut transaction = ProcessedMedia { directory, complete: false };
+    for id in sources {
+        let audio = staged.pool.get(*id).ok_or_else(|| EngineError::Io("processed audio is missing".into()))?;
+        let frames = audio.buffer.frames();
+        if frames == 0 || audio.buffer.channels.is_empty() || audio.buffer.channels.iter().any(|channel| channel.len() != frames || channel.iter().any(|sample| !sample.is_finite())) {
+            return Err(EngineError::Io("processed audio is empty, non-finite or has mismatched channel lengths".into()));
+        }
+        let options = EncodeOptions { format: FileFormat::Wav, bit_depth: soundcraft_audio_io::BitDepth::Float32, dither: false, bwf: None };
+        let bytes = soundcraft_audio_io::encode(&audio.buffer, &options).map_err(|error| EngineError::Io(error.to_string()))?;
+        let path = transaction.directory.join(format!("{}.wav", id.0));
+        replace_file(&path.with_extension("part"), &path, &bytes)?;
+        let source = staged.sources.iter_mut().find(|source| source.id == *id).ok_or_else(|| EngineError::Io("processed source metadata is missing".into()))?;
+        source.path = path.to_string_lossy().into_owned();
+        source.unsaved = false;
+    }
+    for (name, session) in [("before", before), ("ready", &*staged)] {
+        let mut recovery = session.clone();
+        if let Some(folder) = &session.folder {
+            for source in &mut recovery.sources {
+                if Path::new(&source.path).is_relative() { source.path = folder.join(&source.path).to_string_lossy().into_owned(); }
+            }
+        }
+        let text = recovery.to_json().map_err(|error| EngineError::Io(error.to_string()))?;
+        let path = transaction.directory.join(format!("{name}.scraft"));
+        replace_file(&path.with_extension("part"), &path, text.as_bytes())?;
+    }
+    sync_dir(&transaction.directory);
+    transaction.complete = true;
+    Ok(())
+}
+
+struct ProcessedMedia {
+    directory: PathBuf,
+    complete: bool,
+}
+
+impl Drop for ProcessedMedia {
+    fn drop(&mut self) {
+        if !self.complete { let _ = std::fs::remove_dir_all(&self.directory); }
+    }
+}
+
 /// A relative `Audio Files/` path no other source in `s` already uses.
 fn unique_audio_rel(s: &Session, stem: &str) -> String {
     let stem = sanitize_name(stem);
@@ -1952,3 +2007,4 @@ mod bundle_tests {
         let _ = std::fs::remove_file(&p);
     }
 }
+

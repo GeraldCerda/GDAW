@@ -23,6 +23,20 @@ impl Default for PadEffects {
 }
 
 impl PadEffects {
+    pub fn reserve(&mut self, budget: usize) {
+        if self.enabled {
+            for pad in &mut self.pads { pad.align.reserve(budget, self.scratch.len()); }
+        }
+    }
+    pub fn capacity_exceeded(&self) -> bool { self.pads.iter().any(|pad| pad.align.overflow) }
+    pub fn inherit(&mut self, previous: &mut Self, track: TrackId, fresh: &[(TrackId, usize)]) {
+        for (index, (next, old)) in self.pads.iter_mut().zip(&mut previous.pads).enumerate() {
+            for (slot, (next, old)) in next.slots.iter_mut().zip(&mut old.slots).enumerate() {
+                if !fresh.contains(&(track, drum_pad_slot((index + 36) as u8, slot).unwrap_or(INSTRUMENT_SLOT))) { inherit_slot(next, old); }
+            }
+            inherit_delay(&mut next.align, &mut old.align);
+        }
+    }
     pub fn retire(&mut self, context: &mut SlotCtx<'_>) {
         for pad in &mut self.pads {
             for slot in pad.slots.drain(..) { context.retire(slot); }
@@ -41,7 +55,7 @@ impl PadEffects {
             pad.align.clear();
             for slot in pad.slots.iter_mut().flatten() {
                 slot.plugin.reset();
-                slot.failed = false;
+                slot.failed = slot.pending;
             }
         }
     }
@@ -236,3 +250,4 @@ mod tests {
         assert_eq!(drum_pad_slot(36,usize::MAX),None);
     }
 }
+

@@ -350,6 +350,21 @@ impl Engine {
                 return Err(EngineError::Internal(id.to_string(), panic_message(&*p)));
             }
         };
+        let result = result.and_then(|value| {
+            if !Arc::ptr_eq(&before, &self.doc) && !id.starts_with("session.") && !id.starts_with("file.") {
+                let routes_changed = !before.busses.iter().map(|bus| (bus.id, bus.format)).eq(self.doc.busses.iter().map(|bus| (bus.id, bus.format)))
+                    || !before.tracks.iter().zip(&self.doc.tracks).all(|(old, new)| old.id == new.id && old.kind == new.kind
+                        && old.inactive == new.inactive && old.mixer.input == new.mixer.input && old.mixer.output == new.mixer.output
+                        && old.mixer.sends.iter().map(|send| send.as_ref().map(|send| &send.target)).eq(new.mixer.sends.iter().map(|send| send.as_ref().map(|send| &send.target))))
+                    || before.tracks.len() != self.doc.tracks.len();
+                if !routes_changed { return Ok(value); }
+                let previous = soundcraft_mix::routing_diagnostics(&before);
+                if let Some((track, problem)) = soundcraft_mix::routing_diagnostics(&self.doc).into_iter().find(|issue| !previous.contains(issue)) {
+                    return Err(EngineError::BadParams(id.to_string(), format!("track {}: {problem}", track.0)));
+                }
+            }
+            Ok(value)
+        });
         if !Arc::ptr_eq(&before, &self.doc) {
             // Only a change to the document ends a gesture, so Stop doesn't split the pass it ends.
             self.merge_key = None;
@@ -537,3 +552,4 @@ mod dirty_tests {
         assert!(!e.is_dirty());
     }
 }
+

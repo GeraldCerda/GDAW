@@ -341,6 +341,7 @@ pub struct SoundApp {
     touched: std::collections::HashSet<TrackId>,
     /// The pass's last point; `i64::MIN` after a stop or a jump, so the next point erases nothing it skipped.
     last_write_at: Samples,
+    touch_baselines: std::collections::HashMap<TrackId, soundcraft_model::AutomationLane>,
     pub frame_ms: f32,
     last_frame: Option<f64>,
     last_meter_poll: f64,
@@ -423,6 +424,7 @@ impl SoundApp {
             arrange_request: false,
             touched: std::collections::HashSet::new(),
             last_write_at: i64::MIN,
+            touch_baselines: std::collections::HashMap::new(),
             frame_ms: 0.0,
             last_frame: None,
             last_meter_poll: f64::NEG_INFINITY,
@@ -1041,6 +1043,30 @@ impl SoundApp {
             Some(Gesture::Fader { track, .. }) => Some(*track),
             _ => None,
         };
+        for track in &self.engine.session().tracks {
+            if dragging && fader_track == Some(track.id) && !self.touched.contains(&track.id) {
+                let mut lane = track.lane(&soundcraft_model::AutoParam::Volume).cloned()
+                    .unwrap_or_else(|| soundcraft_model::AutomationLane::new(soundcraft_model::AutoParam::Volume));
+                if lane.points.is_empty() {
+                    let initial = match &self.gesture { Some(Gesture::Fader { start_db, .. }) => *start_db, _ => track.mixer.volume_db };
+                    lane.set_point(0, initial);
+                }
+                self.touch_baselines.insert(track.id, lane);
+            }
+        }
+        let released: Vec<_> = self.engine.session().tracks.iter().filter(|track| {
+            self.touched.contains(&track.id) && matches!(track.mixer.automation_mode, M::Touch | M::TouchLatch)
+                && (!dragging || fader_track != Some(track.id) || !playing)
+        }).map(|track| (track.id, track.mixer.volume_db)).collect();
+        for (track, value) in released {
+            let end = pos.saturating_add(self.engine.session().sample_rate.samples(0.1));
+            if let Some(baseline) = self.touch_baselines.remove(&track) {
+                let target = baseline.value_at(end, value);
+                let _ = self.engine.execute_merged("automation.set_point", &serde_json::json!({"track": track.0, "param": "volume", "at": pos, "value": value}), PASS);
+                let _ = self.engine.execute_merged("automation.set_point", &serde_json::json!({"track": track.0, "param": "volume", "at": end, "from": pos, "value": target}), PASS);
+            }
+            self.touched.remove(&track);
+        }
         let writes: Vec<(TrackId, f32)> = self
             .engine
             .session()
@@ -1052,7 +1078,8 @@ impl SoundApp {
                 let write = match m {
                     M::Write => true,
                     M::Touch => touched_now,
-                    M::Latch | M::TouchLatch => touched_now || self.touched.contains(&t.id),
+                    M::Latch => touched_now || self.touched.contains(&t.id),
+                    M::TouchLatch => touched_now,
                     _ => false,
                 };
                 write.then_some((t.id, t.mixer.volume_db))
@@ -1068,6 +1095,7 @@ impl SoundApp {
         }
         if !playing {
             self.touched.clear();
+            self.touch_baselines.clear();
             self.engine.end_merge();
         }
     }
@@ -1778,3 +1806,4 @@ mod tests {
         assert!((speed(&app) - 1.0).abs() < 1e-3, "a half-speed pass that ends on its own restores full speed");
     }
 }
+

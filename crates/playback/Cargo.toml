@@ -8,6 +8,7 @@ rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
+concurrent-queue = "=2.5.0"
 soundcraft-time.workspace = true
 soundcraft-audio-io.workspace = true
 soundcraft-model.workspace = true
@@ -32,3 +33,4 @@ serde_json.workspace = true
 
 [lints]
 workspace = true
+

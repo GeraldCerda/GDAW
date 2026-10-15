@@ -36,3 +36,10 @@ No Rust compilation, type/borrow checking, regression execution, hardware record
 ## Separate pending user interface request
 
 The user wants instruments presented as ordinary Pro Tools insert slots, with the bottom device interface and no separate tiny instrument add/remove blocks. Track.instrument / INSTRUMENT_SLOT remain separate internally; this request is not implemented by this architecture checkpoint. Prior Pro Tools/Ableton research must not be presented as an implementation.
+
+
+Continuation status — later on 2026-10-15
+----------------------------------------
+
+Source work continued from 25d09ab3caf5ed5508a902276deedf816e9841c9. Read [GDAW_CORE_CONTINUATION_2026-10-15.md](GDAW_CORE_CONTINUATION_2026-10-15.md) before further edits. It records the implemented source changes, exact before/after examples, remaining implementation gaps and unperformed verification. The architecture work is still incomplete; this is not production-ready. No clone, compilation, regression execution, application build, installer or tester was performed. The tester source pin remains unchanged.
+

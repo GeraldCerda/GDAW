@@ -7,6 +7,9 @@ use soundcraft_model::{AutoParam, AutomationMode, INSERT_SLOTS, Insert, SEND_SLO
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
+        cmd!("mix.routing_diagnostics", "Routing Diagnostics", [], None, "{}", has_tracks, |e, _| {
+            Ok(json!({"issues": soundcraft_mix::routing_diagnostics(e.session()).into_iter().map(|(track, problem)| json!({"track": track.0, "problem": problem})).collect::<Vec<_>>()}))
+        }),
         cmd!("mix.volume", "Set Volume", [], None, "{tracks?, db: -144..12 | delta_db}", has_selection, volume),
         cmd!("mix.pan", "Set Pan", [], None, "{tracks?, pan: -1..1, index?: 0|1}", has_selection, pan),
         cmd!("mix.mute", "Mute", [], Some("Shift+M"), "{tracks?, value?: bool}", has_selection, |e, p| toggle(
@@ -296,12 +299,22 @@ fn track_slot(e: &Engine, p: &Value, cmd: &str, max: usize) -> Result<(TrackId, 
 fn insert(e: &mut Engine, p: &Value) -> Result<Value> {
     let plugin = str_param(p, "plugin").ok_or_else(|| bad("mix.insert", "`plugin` required"))?.to_string();
     let info = super::clap::plugin_info(&plugin).ok_or_else(|| bad("mix.insert", format!("unknown plugin `{plugin}`")))?;
+    if info.is_instrument {
+        let mut params = p.clone();
+        if p.get("slot").is_some() {
+            let slot = slot_of(p, "slot", INSERT_SLOTS).ok_or_else(|| bad("mix.insert", "slot must be A..J or 0..9"))?;
+            params["slot"] = slot.into();
+        }
+        return super::instrument::set_instrument(e, &params);
+    }
     let t = tracks_required(e, "mix.insert", p)?.first().copied().ok_or_else(|| bad("mix.insert", "no track"))?;
     let explicit = slot_of(p, "slot", INSERT_SLOTS);
     let s = e.session_mut();
     let tr = s.track_mut(t).ok_or_else(|| bad("mix.insert", "no track"))?;
     let slot =
-        explicit.or_else(|| tr.mixer.inserts.iter().position(Option::is_none)).ok_or_else(|| bad("mix.insert", "all insert slots are in use"))?;
+        explicit.or_else(|| tr.mixer.inserts.iter().enumerate().find(|(slot, insert)| insert.is_none() && tr.instrument_insert_slot() != Some(*slot)).map(|(slot, _)| slot))
+            .ok_or_else(|| bad("mix.insert", "all insert slots are in use"))?;
+    if tr.instrument_insert_slot() == Some(slot) { tr.instrument = None; }
     let mut ins = Insert::new(info.id);
     for pi in info.params {
         ins.params.insert(pi.id.to_string(), pi.default);
@@ -322,7 +335,13 @@ fn insert(e: &mut Engine, p: &Value) -> Result<Value> {
 }
 
 fn insert_remove(e: &mut Engine, p: &Value) -> Result<Value> {
-    let (t, slot) = track_slot(e, p, "mix.insert_remove", INSERT_SLOTS)?;
+    let (t, slot) = track_slot(e, p, "mix.insert_remove", INSERT_SLOTS + 1)?;
+    if let Some(track) = e.session_mut().track_mut(t)
+        && track.instrument_insert_slot() == Some(slot)
+    {
+        track.instrument = None;
+        return Ok(json!({}));
+    }
     if let Some(tr) = e.session_mut().track_mut(t)
         && let Some(s) = tr.mixer.inserts.get_mut(slot)
     {
@@ -332,26 +351,25 @@ fn insert_remove(e: &mut Engine, p: &Value) -> Result<Value> {
 }
 
 fn insert_bypass(e: &mut Engine, p: &Value) -> Result<Value> {
-    let (t, slot) = track_slot(e, p, "mix.insert_bypass", INSERT_SLOTS)?;
+    let (t, slot) = track_slot(e, p, "mix.insert_bypass", INSERT_SLOTS + 1)?;
     let val = p.get("value").and_then(Value::as_bool);
     let s = e.session_mut();
     let ins = s
         .track_mut(t)
-        .and_then(|tr| tr.mixer.inserts.get_mut(slot))
-        .and_then(Option::as_mut)
+        .and_then(|track| if track.instrument_insert_slot() == Some(slot) { track.instrument.as_mut() } else { track.mixer.inserts.get_mut(slot).and_then(Option::as_mut) })
         .ok_or_else(|| bad("mix.insert_bypass", "empty slot"))?;
     ins.bypass = val.unwrap_or(!ins.bypass);
     Ok(json!({"bypass": ins.bypass}))
 }
 
 fn insert_param(e: &mut Engine, p: &Value) -> Result<Value> {
-    let (t, slot) = track_slot(e, p, "mix.insert_param", INSERT_SLOTS)?;
+    let (t, slot) = track_slot(e, p, "mix.insert_param", INSERT_SLOTS + 1)?;
     let param = str_param(p, "param").ok_or_else(|| bad("mix.insert_param", "`param` required"))?.to_string();
     let value =
         p.get("value").and_then(Value::as_f64).filter(|v| v.is_finite()).ok_or_else(|| bad("mix.insert_param", "`value` must be a number"))? as f32;
     let s = e.session_mut();
     let ins =
-        s.track_mut(t).and_then(|tr| tr.mixer.inserts.get_mut(slot)).and_then(Option::as_mut).ok_or_else(|| bad("mix.insert_param", "empty slot"))?;
+        s.track_mut(t).and_then(|track| if track.instrument_insert_slot() == Some(slot) { track.instrument.as_mut() } else { track.mixer.inserts.get_mut(slot).and_then(Option::as_mut) }).ok_or_else(|| bad("mix.insert_param", "empty slot"))?;
     let info = super::clap::plugin_info(&ins.plugin).ok_or_else(|| bad("mix.insert_param", "unknown plugin"))?;
     let pi =
         info.params.iter().find(|x| x.id == param).ok_or_else(|| bad("mix.insert_param", format!("`{}` has no parameter `{param}`", info.id)))?;
@@ -506,6 +524,9 @@ pub(crate) fn current_value(tr: &soundcraft_model::Track, param: &AutoParam) -> 
         AutoParam::SendPan(i) => tr.mixer.sends.get(usize::from(*i)).and_then(Option::as_ref).map_or(0.0, |s| s.pan),
         AutoParam::SendMute(i) => tr.mixer.sends.get(usize::from(*i)).and_then(Option::as_ref).map_or(0.0, |s| f32::from(u8::from(s.mute))),
         AutoParam::Plugin { slot, param } => {
+            if tr.instrument_insert_slot() == Some(usize::from(*slot)) {
+                return tr.instrument.as_ref().and_then(|insert| insert.params.get(param)).copied().unwrap_or(0.0);
+            }
             tr.mixer.inserts.get(usize::from(*slot)).and_then(Option::as_ref).and_then(|i| i.params.get(param).copied()).unwrap_or(0.0)
         }
     }
@@ -887,3 +908,4 @@ mod tests {
         assert_eq!((sl.level_db, sl.pan, sl.mute, sl.pre_fader), (-9.0, 0.5, true, true));
     }
 }
+

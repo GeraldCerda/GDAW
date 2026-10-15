@@ -675,6 +675,9 @@ pub struct InputRing {
     tail: AtomicUsize,
     phase: AtomicU64,
     dropped: AtomicU64,
+    underflows: AtomicU64,
+    target: AtomicUsize,
+    correction: AtomicU64,
     pub channels: std::sync::atomic::AtomicUsize,
     /// Input device sample rate in Hz (0 when unknown, which reads as "same as the session").
     rate: u32,
@@ -693,6 +696,9 @@ impl InputRing {
             tail: AtomicUsize::new(0),
             phase: AtomicU64::new(0.0f64.to_bits()),
             dropped: AtomicU64::new(0),
+            underflows: AtomicU64::new(0),
+            target: AtomicUsize::new(0),
+            correction: AtomicU64::new(1.0f64.to_bits()),
             channels: std::sync::atomic::AtomicUsize::new(ch),
             rate,
         })
@@ -724,6 +730,15 @@ impl InputRing {
         self.dropped.load(Ordering::Relaxed)
     }
 
+    pub fn align_clocks(&self, output_frames: usize, output_rate: u32) {
+        let rate = if self.rate == 0 { output_rate } else { self.rate };
+        let target = ((output_frames.max(1) as f64 * f64::from(rate) / f64::from(output_rate.max(1))) * 2.0).ceil() as usize;
+        self.target.store(target.clamp(2, ((self.mask + 1) / 4).max(2)), Ordering::Relaxed);
+        self.correction.store(1.0f64.to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn underflow_frames(&self) -> u64 { self.underflows.load(Ordering::Relaxed) }
+
     /// Fill `out` (planar, at `session_rate`) with up to `frames` frames, converting from the
     /// input rate. Missing frames are silence.
     pub fn pop_into(&self, out: &mut [Vec<f32>], frames: usize, session_rate: u32) {
@@ -735,13 +750,24 @@ impl InputRing {
         let head = self.head.load(Ordering::Acquire);
         let mut available = head.wrapping_sub(tail).min(self.mask + 1);
         let mut phase = f64::from_bits(self.phase.load(Ordering::Relaxed));
-        let step = if self.rate == 0 || session_rate == 0 { 1.0 } else { f64::from(self.rate) / f64::from(session_rate) };
+        let nominal = if self.rate == 0 || session_rate == 0 { 1.0 } else { f64::from(self.rate) / f64::from(session_rate) };
+        let target = self.target.load(Ordering::Relaxed);
+        let mut correction = f64::from_bits(self.correction.load(Ordering::Relaxed));
+        if target > 0 {
+            let error = (available as f64 - target as f64) / target as f64;
+            let desired = 1.0 + (error * 0.0005).clamp(-0.002, 0.002);
+            let smoothing = (frames as f64 / f64::from(session_rate.max(1))).min(1.0);
+            correction += (desired - correction) * smoothing;
+        }
+        let step = nominal * correction;
         for f in 0..frames {
             let consumed = (phase.floor() as usize).min(available);
             tail = tail.wrapping_add(consumed);
             available -= consumed;
             phase -= consumed as f64;
             if phase >= 1.0 || available == 0 || (phase > 0.0 && available < 2) {
+                self.underflows.fetch_add(frames.saturating_sub(f) as u64, Ordering::Relaxed);
+                if available == 0 { phase = 0.0; }
                 break;
             }
             let fr = phase as f32;
@@ -761,6 +787,7 @@ impl InputRing {
         tail = tail.wrapping_add(consumed);
         phase -= consumed as f64;
         self.phase.store(phase.to_bits(), Ordering::Relaxed);
+        self.correction.store(correction.to_bits(), Ordering::Relaxed);
         self.tail.store(tail, Ordering::Release);
     }
 }
@@ -880,4 +907,5 @@ mod input_config_tests {
         assert!(input_config_rank(12, cpal::SampleFormat::F32) < input_config_rank(12, cpal::SampleFormat::I32));
     }
 }
+
 

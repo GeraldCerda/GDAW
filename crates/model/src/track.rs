@@ -235,6 +235,8 @@ pub struct Track {
     /// Instrument plugin (instrument tracks) — registry id.
     #[serde(default)]
     pub instrument: Option<crate::Insert>,
+    #[serde(default)]
+    pub instrument_slot: Option<usize>,
     /// Ticks (musical) or samples timebase for clips.
     #[serde(default)]
     pub ticks_timebase: bool,
@@ -251,6 +253,14 @@ fn yes() -> bool {
 }
 
 impl Track {
+    pub fn instrument_insert_slot(&self) -> Option<usize> {
+        self.instrument.as_ref()?;
+        let preferred = self.instrument_slot.unwrap_or(0);
+        if preferred < crate::INSERT_SLOTS && self.mixer.inserts.get(preferred).is_some_and(Option::is_none) {
+            return Some(preferred);
+        }
+        self.mixer.inserts.iter().position(Option::is_none).or(Some(crate::INSERT_SLOTS))
+    }
     pub fn new(id: TrackId, name: impl Into<String>, kind: TrackKind, format: ChannelFormat, color: [u8; 3]) -> Self {
         let name = name.into();
         let format = if kind.is_midi() && kind == TrackKind::Midi { ChannelFormat::Mono } else { format };
@@ -284,6 +294,7 @@ impl Track {
             folder: None,
             folder_open: true,
             instrument: None,
+            instrument_slot: None,
             ticks_timebase: kind.is_midi(),
             elastic: None,
             pinned: false,
@@ -377,3 +388,4 @@ mod tests {
         assert_eq!(serde_json::from_str::<TrackHeight>("\"Large\"").unwrap(), TrackHeight::Large);
     }
 }
+

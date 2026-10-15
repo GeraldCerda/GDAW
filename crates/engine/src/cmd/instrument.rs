@@ -32,9 +32,9 @@ pub fn specs() -> Vec<CommandSpec> {
 
 /// Fields `mix.instrument` reads. Anything else (a parameter written beside `plugin`, say) used to
 /// be accepted and ignored, so a synth's settings looked set while the render never changed.
-const FIELDS: [&str; 4] = ["track", "tracks", "plugin", "params"];
+const FIELDS: [&str; 5] = ["track", "tracks", "plugin", "params", "slot"];
 
-fn set_instrument(e: &mut Engine, p: &Value) -> Result<Value> {
+pub(super) fn set_instrument(e: &mut Engine, p: &Value) -> Result<Value> {
     if let Some(k) = p.as_object().and_then(|o| o.keys().find(|k| !FIELDS.contains(&k.as_str()))) {
         return Err(bad(
             "mix.instrument",
@@ -67,7 +67,16 @@ fn set_instrument(e: &mut Engine, p: &Value) -> Result<Value> {
     for (k, v) in values {
         ins.params.insert(k, v);
     }
+    let slot = if let Some(value) = p.get("slot") {
+        value.as_u64().and_then(|value| usize::try_from(value).ok()).filter(|slot| *slot < soundcraft_model::INSERT_SLOTS)
+            .ok_or_else(|| bad("mix.instrument", "slot must be 0..9"))?
+    } else {
+        e.session().track(t).and_then(|track| track.instrument_insert_slot().or_else(|| track.mixer.inserts.iter().position(Option::is_none)))
+            .filter(|slot| *slot < soundcraft_model::INSERT_SLOTS).ok_or_else(|| bad("mix.instrument", "all insert slots are in use"))?
+    };
     if let Some(tr) = e.session_mut().track_mut(t) {
+        if let Some(insert) = tr.mixer.inserts.get_mut(slot) { *insert = None; }
+        tr.instrument_slot = Some(slot);
         tr.instrument = Some(ins);
     }
     Ok(json!({"track": t, "plugin": info.id}))
@@ -205,3 +214,4 @@ mod tests {
         assert_eq!(instrument_of(&e, audio), None);
     }
 }
+

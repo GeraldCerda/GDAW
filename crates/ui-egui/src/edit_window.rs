@@ -25,8 +25,7 @@ const COLUMN_TITLES_H: f32 = 16.0;
 /// An optional Edit-window column: view id, menu label, title and width.
 type Column = (&'static str, &'static str, &'static str, f32);
 
-const COLUMNS: [Column; 7] = [
-    ("instruments", "Instruments", "INSTRUMENT", PLUGIN_COLUMN_W),
+const COLUMNS: [Column; 6] = [
     ("inserts_ae", "Inserts A-E", "INSERTS A-E", 92.0),
     ("inserts_fj", "Inserts F-J", "INSERTS F-J", 92.0),
     ("sends_ae", "Sends A-E", "SENDS A-E", PLUGIN_COLUMN_W),
@@ -1406,13 +1405,7 @@ fn plugin_column(app: &mut SoundApp, ui: &mut Ui, track: &Track, col: &str, r: R
     ui.painter().rect_filled(r, 0.0, t.slot_well);
     ui.painter().vline(r.min.x, r.y_range(), Stroke::new(1.0, t.border));
     let mut ui = column_ui(ui, col, r);
-    if col == "instruments" {
-        if r.height() >= 16.0 && track.kind == TrackKind::Instrument {
-            let cell = Rect::from_min_size(r.min + vec2(4.0, 1.0), vec2(r.width() - 8.0, 15.0));
-            crate::mix_window::instrument_slot(app, &mut ui, track, cell);
-        }
-        return;
-    }
+    if col == "instruments" { return; }
     let off = if col.ends_with("ae") { 0 } else { 5 };
     let slot = if col.starts_with("inserts") { crate::mix_window::insert_slot } else { crate::mix_window::send_slot };
     for (index, cell) in plugin_cells(r).into_iter().enumerate() {
@@ -3998,3 +3991,4 @@ mod slot_geometry_tests {
         }
     }
 }
+

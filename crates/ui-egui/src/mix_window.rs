@@ -66,7 +66,7 @@ pub(crate) fn content(app: &mut SoundApp, ui: &mut Ui) {
 fn minimum_strip_height(views: &[String]) -> f32 {
     let all = views.iter().any(|view| view == "all");
     let sections = [
-        ("mic_preamps", 38.0), ("instruments", 38.0), ("object", 24.0),
+        ("mic_preamps", 38.0), ("object", 24.0),
         ("inserts_ae", 105.0), ("inserts_fj", 105.0), ("sends_ae", 105.0), ("sends_fj", 105.0),
         ("eq_curve", 44.0), ("comments", 48.0), ("io", 86.0),
     ];
@@ -193,22 +193,6 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
             if resp.drag_stopped() || resp.lost_focus() {
                 app.engine.end_merge();
             }
-        }
-        y = sec.max.y + 4.0;
-    }
-    if all || has("instruments") {
-        let sec = Rect::from_min_size(pos2(x0, y), vec2(inner_w, 34.0));
-        inset(ui.painter(), sec, t.strip_section);
-        section_label(ui, sec, "INSTRUMENT");
-        let sr = Rect::from_min_size(pos2(x0 + 2.0, sec.min.y + 16.0), vec2(inner_w - 4.0, 15.0));
-        let slot = track.mixer.inserts.iter().position(|i| i.as_ref().is_some_and(|i| plugin_info(&i.plugin).is_some_and(|p| p.is_instrument)));
-        match slot {
-            _ if track.kind == TrackKind::Instrument => instrument_slot(app, ui, track, sr),
-            Some(k) => insert_slot(app, ui, track, k, sr),
-            None if track.kind == TrackKind::Midi => {
-                ui.painter().text(sr.center(), Align2::CENTER_CENTER, "MIDI in: all", regular(9.0), t.text_dim);
-            }
-            None => {}
         }
         y = sec.max.y + 4.0;
     }
@@ -495,31 +479,6 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
     ui.painter().line_segment([pos2(r.max.x, r.min.y), pos2(r.max.x, r.max.y)], Stroke::new(1.0, t.border));
 }
 
-/// An instrument track's INSTRUMENT row: click opens a hosted instrument's plugin window,
-/// right-click (or click, when none is set) picks another instrument. A built-in's parameters
-/// open from that menu. Dropping an audio file on it loads the sampler.
-pub(crate) fn instrument_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, r: Rect) {
-    let t = Tokens::current();
-    let (id, slot) = (track.id, soundcraft_mix::INSTRUMENT_SLOT);
-    let ins = track.instrument.as_ref();
-    let info = ins.and_then(|i| plugin_info(&i.plugin));
-    let resp = ui.interact(r, ui.id().with(("instrument", id.0)), Sense::click());
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Instrument"));
-    match info {
-        Some(info) => used_slot(ui.painter(), r, t.slot_face, Mark::Dot, info.short_name, t.text, None),
-        None => empty_slot(ui.painter(), r, resp.hovered(), Mark::Dot),
-    }
-    let hosted = ins.is_some_and(|i| soundcraft_mix::is_third_party(&i.plugin));
-    if resp.clicked() && hosted && !app.ui.plugin_windows.contains(&(id, slot)) {
-        app.ui.plugin_windows.push((id, slot));
-    }
-    let menu_resp = if hosted { resp.clone().on_hover_text("Click: open instrument · right-click: change") } else { resp.clone() };
-    let popup = if hosted { egui::Popup::context_menu(&menu_resp) } else { egui::Popup::menu(&menu_resp) };
-    let popup = popup.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-    popup.show(|ui| instrument_menu(app, ui, id));
-    crate::sampler_window::drop_target(app, ui.ctx(), r, id);
-}
-
 /// What a plugin slot shows at its left: a dot for inserts, the send's letter, or an arrow for
 /// a send on a short track.
 #[derive(Clone, Copy)]
@@ -594,7 +553,9 @@ fn level_icon(r: Rect) -> Rect {
 pub(crate) fn insert_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: usize, r: Rect) {
     let t = Tokens::current();
     let id = track.id;
-    let ins = track.mixer.inserts.get(slot).cloned().flatten();
+    let instrument = track.instrument_insert_slot() == Some(slot);
+    let address = if instrument { soundcraft_mix::INSTRUMENT_SLOT } else { slot };
+    let ins = if instrument { track.instrument.clone() } else { track.mixer.inserts.get(slot).cloned().flatten() };
     let resp = ui.interact(r, ui.id().with(("ins", id.0, slot)), Sense::click());
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Insert {}", (b'A' + slot as u8) as char)));
     let info = ins.as_ref().and_then(|i| plugin_info(&i.plugin));
@@ -614,8 +575,8 @@ pub(crate) fn insert_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: 
     if resp.clicked() && ins.is_some() {
         if ui.input(|i| i.modifiers.command) {
             let _ = app.run("mix.insert_bypass", json!({"track": id.0, "slot": slot}));
-        } else if !app.ui.plugin_windows.contains(&(id, slot)) {
-            app.ui.plugin_windows.push((id, slot));
+        } else if !app.ui.plugin_windows.contains(&(id, address)) {
+            app.ui.plugin_windows.push((id, address));
         }
     }
     let cmd = if ui.ctx().os().is_mac() { "⌘" } else { "Ctrl+" };
@@ -638,7 +599,11 @@ pub fn plugin_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, oc
     crate::devices::prepare_plugins(app);
     let search = MenuSearch::show(ui, egui::Id::new(("plugin-search", id.0, slot)), "Search plugins…");
     if search.typing() {
-        if let Some(plugin) = plugin_search(app, ui, &search, false) {
+        let picked = plugin_search(app, ui, &search, false).or_else(|| {
+            app.engine.session().track(id).is_some_and(|track| track.kind == TrackKind::Instrument)
+                .then(|| plugin_search(app, ui, &search, true)).flatten()
+        });
+        if let Some(plugin) = picked {
             run_pick(app, ui, "mix.insert", json!({"track": id.0, "slot": slot, "plugin": plugin}));
         }
         return;
@@ -655,18 +620,21 @@ pub fn plugin_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, oc
     if let Some(plugin) = catalog_menu(app, ui, false) {
         run_pick(app, ui, "mix.insert", json!({"track": id.0, "slot": slot, "plugin": plugin}));
     }
+    if app.engine.session().track(id).is_some_and(|track| track.kind == TrackKind::Instrument) {
+        ui.menu_button("Instruments", |ui| instrument_menu(app, ui, id, slot));
+    }
 }
 
 /// The instrument picker of an instrument track: a search field that takes typing at once, then
 /// (until something is typed) its instrument's editor and the built-in, CLAP, VST3 and Audio Units
 /// instruments.
-pub fn instrument_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
+pub fn instrument_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, visual: usize) {
     crate::devices::prepare_plugins(app);
     let slot = soundcraft_mix::INSTRUMENT_SLOT;
     let search = MenuSearch::show(ui, egui::Id::new(("instrument-search", id.0)), "Search instruments…");
     if search.typing() {
         if let Some(plugin) = plugin_search(app, ui, &search, true) {
-            run_pick(app, ui, "mix.instrument", json!({"track": id.0, "plugin": plugin}));
+            run_pick(app, ui, "mix.insert", json!({"track": id.0, "slot": visual, "plugin": plugin}));
         }
         return;
     }
@@ -697,7 +665,7 @@ pub fn instrument_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
         ui.separator();
     }
     if let Some(plugin) = catalog_menu(app, ui, true) {
-        run_pick(app, ui, "mix.instrument", json!({"track": id.0, "plugin": plugin}));
+        run_pick(app, ui, "mix.insert", json!({"track": id.0, "slot": visual, "plugin": plugin}));
     }
 }
 
@@ -1320,3 +1288,4 @@ mod strip_height_tests {
         assert!(all > defaults);
     }
 }
+

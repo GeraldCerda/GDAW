@@ -162,9 +162,6 @@ pub fn insert_effect_at(app: &mut SoundApp, track: TrackId, slot: usize, item: &
         BrowserItem::Sample(_) => return Err("Drop audio on a track or Drum Rack pad; insert slots accept effects".into()),
     };
     let info = crate::mix_window::plugin_info(plugin).ok_or("This effect is unavailable")?;
-    if info.is_instrument {
-        return Err("Choose an instrument on an instrument track; insert slots accept effects".into());
-    }
     let mut command = json!({"track": track.0, "slot": slot, "plugin": plugin});
     if let Some(params) = params {
         command["params"] = params;
@@ -311,13 +308,14 @@ fn device(app: &mut SoundApp, ui: &mut Ui, track: TrackId, slot: usize, insert: 
     ui.set_min_width(rack_width);
     ui.set_max_width(rack_width + 20.0);
     ui.horizontal(|ui| {
-        ui.strong(if instrument { format!("Instrument · {name}") } else { format!("{} · {name}", (b'A' + slot as u8) as char) });
-        if !instrument {
+        let visual = if instrument { app.engine.session().track(track).and_then(|track| track.instrument_insert_slot()).unwrap_or(0) } else { slot };
+        ui.strong(format!("{} · {name}", (b'A' + visual.min(25) as u8) as char));
+        {
             if ui.small_button(if insert.bypass { "Enable" } else { "Bypass" }).clicked() {
-                let _ = app.run("mix.insert_bypass", json!({"track": track.0, "slot": slot}));
+                let _ = app.run("mix.insert_bypass", json!({"track": track.0, "slot": visual}));
             }
             if ui.small_button("×").clicked() {
-                let _ = app.run("mix.insert_remove", json!({"track": track.0, "slot": slot}));
+                let _ = app.run("mix.insert_remove", json!({"track": track.0, "slot": visual}));
             }
         }
     });
@@ -514,14 +512,13 @@ pub fn chain(app: &mut SoundApp, ui: &mut Ui) {
     ui.separator();
     let response = egui::ScrollArea::horizontal().id_salt("track_device_chain").show(ui, |ui| {
         ui.horizontal_top(|ui| {
-            if let Some(instrument) = &track.instrument {
+            for visual in 0..=soundcraft_model::INSERT_SLOTS {
+                let instrument = track.instrument_insert_slot() == Some(visual);
+                let insert = if instrument { track.instrument.as_ref() } else { track.mixer.inserts.get(visual).and_then(Option::as_ref) };
+                let Some(insert) = insert else { continue };
+                let address = if instrument { soundcraft_mix::INSTRUMENT_SLOT } else { visual };
                 egui::Frame::NONE.fill(Tokens::current().panel_bg).stroke(egui::Stroke::new(1.0, Tokens::current().border)).inner_margin(6.0).show(ui, |ui| {
-                    ui.push_id(("device", track.id.0, soundcraft_mix::INSTRUMENT_SLOT), |ui| device(app, ui, track.id, soundcraft_mix::INSTRUMENT_SLOT, instrument));
-                });
-            }
-            for (slot, insert) in track.mixer.inserts.iter().enumerate().filter_map(|(slot, insert)| insert.as_ref().map(|insert| (slot, insert))) {
-                egui::Frame::NONE.fill(Tokens::current().panel_bg).stroke(egui::Stroke::new(1.0, Tokens::current().border)).inner_margin(6.0).show(ui, |ui| {
-                    ui.push_id(("device", track.id.0, slot), |ui| device(app, ui, track.id, slot, insert));
+                    ui.push_id(("device", track.id.0, address), |ui| device(app, ui, track.id, address, insert));
                 });
             }
             ui.vertical(|ui| {
@@ -546,13 +543,10 @@ pub fn chain(app: &mut SoundApp, ui: &mut Ui) {
                         }
                     }
                 }
-                if let Some(slot) = track.mixer.inserts.iter().position(Option::is_none) {
+                if let Some(slot) = track.mixer.inserts.iter().enumerate().find(|(slot, insert)| insert.is_none() && track.instrument_insert_slot() != Some(*slot)).map(|(slot, _)| slot) {
                     ui.menu_button("Add effect to next empty insert", |ui| crate::mix_window::plugin_menu(app, ui, track.id, slot, false));
                 } else {
                     ui.label("All effect slots are in use");
-                }
-                if track.kind == TrackKind::Instrument {
-                    ui.menu_button("Choose instrument", |ui| crate::mix_window::instrument_menu(app, ui, track.id));
                 }
                 ui.allocate_space(vec2(180.0, 120.0));
             });
@@ -921,3 +915,4 @@ fn pad_effects(app: &mut SoundApp, ui: &mut Ui, track: TrackId, instrument: &Ins
         ui.weak("Drop an effect into A–J · before track inserts");
     });
 }
+
