@@ -5,6 +5,7 @@ verify=0
 for argument in "$@"; do
     case "$argument" in
         --verify) verify=1 ;;
+        --verify-ui) verify=2 ;;
         *) printf 'Unknown option: %s\n' "$argument" >&2; exit 2 ;;
     esac
 done
@@ -14,7 +15,7 @@ if [ "$(uname -s)" != "Darwin" ]; then
     exit 2
 fi
 
-commit="d60c08d7b79187518302218b49e13dbec883607c"
+commit="3a232504ba7ea62f31d0e397a729fe6eb7571e9e"
 mkdir -p "$kit_dir/logs"
 build_log="$kit_dir/logs/build-$(date +%Y%m%d-%H%M%S).log"
 exec > >(tee -a "$build_log") 2>&1
@@ -64,14 +65,19 @@ export CARGO_TARGET_DIR="$kit_dir/target"
 export MACOSX_DEPLOYMENT_TARGET=11.0
 cd "$source_dir"
 
-if [ "$verify" = "1" ]; then
+if [ "$verify" != "0" ]; then
     rustup component add rustfmt --toolchain stable
-    if cargo +stable fmt --all -- --check; then
+    format_log="$kit_dir/logs/format-$commit.log"
+    if cargo +stable fmt --all -- --check > "$format_log" 2>&1; then
         printf 'Formatting check passed.\n'
     else
-        printf 'Formatting check failed; continuing to compile and run the regression suites.\n'
+        printf 'Formatting differences recorded in %s; continuing to compile and run the regression suites.\n' "$format_log"
     fi
-    cargo +stable test --locked --release --target "$target" -p soundcraft-dsp -p soundcraft-model -p soundcraft-engine -p soundcraft-mix -p soundcraft-playback -p soundcraft-ui-egui
+    if [ "$verify" = "2" ]; then
+        cargo +stable test --locked --release --target "$target" -p soundcraft-ui-egui
+    else
+        cargo +stable test --locked --release --target "$target" -p soundcraft-dsp -p soundcraft-model -p soundcraft-engine -p soundcraft-mix -p soundcraft-playback -p soundcraft-ui-egui
+    fi
 fi
 
 cargo +stable build --locked --release --target "$target" -p soundcraft
