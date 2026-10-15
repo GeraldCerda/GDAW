@@ -434,7 +434,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                 Dialog::RenameMarker { id, name } => {
                     name_field(ui, name);
                     if buttons(ui, "OK", enter) {
-                        action = Some(("markers.edit".into(), json!({"id": id.0, "rename": name})));
+                        action = Some(("markers.edit".into(), json!({"id": id.0, "name": name})));
                     }
                 }
                 Dialog::ClearClips { clips, sources, message } => {

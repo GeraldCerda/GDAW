@@ -14,6 +14,9 @@ impl SoundApp {
             self.keypad.recall = None;
             self.keypad.events.clear();
         }
+        if input.events.iter().any(|event| matches!(event, Event::Key { key, pressed:true, .. } if *key != Key::F35)) {
+            self.keypad.recall = None;
+        }
         let text = context.egui_wants_keyboard_input() || self.dialogs.open.is_some();
         input.events.retain_mut(|event| {
             if let Event::Key { key: Key::F35, physical_key: Some(original), pressed, repeat, modifiers } = event {
@@ -171,4 +174,16 @@ mod tests {
         assert_eq!(app.engine.session().edit.selection.start, 48000);
         assert!(!app.engine.transport.playing);
     }
+    #[test]
+    fn ordinary_keys_cancel_an_incomplete_memory_location_number() {
+        let mut app=app();
+        let context=egui::Context::default();
+        app.keypad.recall=Some(12);
+        let mut input=egui::RawInput::default();
+        input.events.push(Event::Key { key:Key::Escape, physical_key:Some(Key::Escape), pressed:true, repeat:false, modifiers:Modifiers::NONE });
+        app.native_keypad_input(&context,&mut input);
+        assert_eq!(app.keypad.recall,None);
+        assert_eq!(input.events.len(),1);
+    }
+
 }
