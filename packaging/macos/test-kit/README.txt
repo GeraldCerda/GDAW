@@ -1,74 +1,35 @@
 GDAW Mac Test Kit v4
 
-Source revision: aeb3a7d2930262a8c468df4b5b6307ac4a6838a3
+Source revision: 55dda6b6541efe16e85ffc8839c96fe650df746e
 Repository: https://github.com/GeraldCerda/GDAW
 
-This kit contains source-download, build and launch scripts. It downloads the complete pinned source from your fork when you run it on your Mac. No binary is included and no DAW build was performed while preparing this kit.
+This kit downloads pinned source from GeraldCerda/GDAW and builds it on your Mac. No DAW binary, installer or source ZIP was built while preparing these changes. Existing v3 folders and Cargo caches remain usable with the updated build_test.sh.
 
-Save the ZIP to Downloads and run the supplied Terminal command. The script installs Rust if needed, checks Apple Command Line Tools, downloads the pinned source, compiles the native Mac app, generates a Mac icon from Purple G icon with transparent background.png, creates and locally signs GDAW Test.app, and launches it.
+Run the regression suites before installing this pass:
+bash "$HOME/Downloads/GDAW_Mac_Test_Kit_v3/build_test.sh" --verify
 
-The app goes to ~/Applications/GDAW Test.app. Previous tester copies are renamed as timestamped backups. Settings, presets and autosaves used by launch_test.sh go to ~/Library/Application Support/GDAW Test. Always launch with launch_test.sh to keep this isolated profile. Double-clicking the app directly uses the default profile.
+Use the actual kit folder if yours is named v4. The verification option checks formatting, then runs the DSP, model, engine, mix, playback and UI tests. A test failure stops before installation. Formatting failures are reported; compilation and regression checks still follow. Running without --verify compiles and installs without running those tests.
 
-New sessions start with MIDI 1 and its 16-pad Drum Rack, plus mono Audio 1 assigned physical input 1. Input and output columns, a left browser, and the bottom selected-track device chain are visible. Cmd+= shows or hides a separate mixer while preserving the Edit window; opening it requests focus. The main window and app menu are called G; the test bundle remains GDAW Test for easy identification.
+The script checks Apple Command Line Tools, installs or updates Rust, downloads this source revision, builds the Mac application and signs it locally. GDAW Test.app goes to ~/Applications. Previous copies are retained as timestamped backups. The existing launch_test.sh keeps settings in ~/Library/Application Support/GDAW Test. Logs remain in the kit's logs folder.
 
-Plugin browsing defaults to developer groups. Switch Group by to Effect for compressors, EQs, limiters, gates, reverbs and the other reported categories. Filter by AU, VST3, CLAP or Built-in without collapsing distinct plugin versions. Search covers names, developer, effect group and format. Installed plugins are scanned in a background thread; Rescan refreshes the list. Plugins without usable classification remain in Other Effects or Dynamics. Matching AU/VST3 names and developers share the most specific available category.
+Implemented source changes in this pass:
+- Drum Rack has ten labelled effect slots A-J for each pad. Add, remove and bypass effects, adjust parameters or drop an effect/preset onto an exact slot. Pad processing precedes the track inserts. AU, VST3 and CLAP use the existing host, native editors and state capture. Pad chains save with the session and support undo.
+- Pad chains align their processing latency. Invalid audio bypasses the failing pad effect and reports its slot while other pads continue.
+- Audition follows the selected sample's tuned duration and device rate. Short hits on the same rack preserve earlier long hits. Meters follow the actual preview lifetime.
+- Native keypad identity is preserved separately from the number row. Transport-mode keypad 0-9, supported Command/Option keypad windows, keypad grid/nudge changes, period-number-period recall and keypad Enter memory-location entry are connected. Return remains separate.
+- Instrument editor parameter changes are stored through the instrument command instead of being discarded.
 
-Physical audio input capture now starts for assigned audio tracks even before record enable. Dedicated pre-processing input meters remain visible during playback; stopped track meters also show the input. Enabling Monitor is still explicit. Input capture requests the widest supported channel configuration at the chosen or default input rate. Routing changes clear stale input peaks. Device names, opened channel counts and capture failures are visible in Audio Setup, I/O Setup and Track Devices.
+Existing starter layout remains: MIDI 1 with Drum Rack, mono Audio 1 on physical input 1, visible I/O and insert/send columns, left browser, bottom devices, light appearance, eighth-note Grid and Purple G branding. Cmd+= toggles a separate mixer. Plugin groups and format filters remain available in the browser and insert menus. Drum libraries use the user's assigned folder; no samples are bundled.
 
-The Drum Rack starts with empty pads. Load your own samples through Load, the sample browser, the clip list, or a Finder drop onto a pad. Assigned pads support stopped-transport audition, gain, pan, tuning and mute. Built-in devices have inline controls in the bottom chain. Hosted plugins open native editor windows. The browser supports device search, sample folders, saved presets and loading devices onto the selected track. Warp, formant and clip-pitch automation work is outside this change.
+Mac checks after the regression suites pass:
+1. Compare number-row Command+1 with keypad Command+1. Check keypad transport, grid/nudge, memory recall and keypad Enter. Confirm keypad typing still works in text fields.
+2. Open and hide the separate mixer with Command+= from both windows and while editing text. Check native focus, close/reopen and small-screen scrolling.
+3. Select the intended input and output devices. Speak into Audio 1's assigned input before arming. Verify live input meters, then monitoring, recording and playback on the actual interface.
+4. Assign a drum library or load samples manually. Audition a long sample at normal and reduced pitch, then trigger a short hit. Check that the long hit continues.
+5. Put an effect on one pad. Check that another pad stays dry. Check bypass, removal, undo and both built-in and native editors. Save and reopen with pad effects and verify sound, parameters and native state.
+6. Verify browser groups, format filters, precise insert drops, Edit fader/pan, MIDI grid positioning, automation and a short bounce.
 
-Commands after extraction:
-bash "$HOME/Downloads/GDAW_Mac_Test_Kit_v4/build_test.sh"
-bash "$HOME/Downloads/GDAW_Mac_Test_Kit_v4/launch_test.sh"
+Known limits:
+Complete Pro Tools keyboard/gesture parity remains unfinished, including the remaining modifier-nudge combinations and keypad Shuttle mode. Drum Rack does not yet reproduce the full Ableton sample editor, choke/return routing or chain reordering. Runtime native plugin processing is still in-process. The earlier test-process SIGSEGV was not independently reproduced or conclusively diagnosed.
 
-Default build mode installs and launches after compilation. Optional verification deliberately stops before installation if any test fails. To reuse a v3 build cache, replace its build_test.sh with the current pinned script and run it without --verify.
-
-Fade controls now use the visible editor bounds for drawing and hit-testing. Headless editor tests do not automatically scan native plugins. The reported test-process SIGSEGV has not been independently reproduced or conclusively diagnosed.
-
-Optional regression run on your Mac:
-bash "$HOME/Downloads/GDAW_Mac_Test_Kit_v4/build_test.sh" --verify
-
-Optional mode reports formatting results, then compiles and runs DSP, model, engine, mix, playback and UI regression suites before building the app. A failing test stops the script. Default mode compiles the desktop app without running these tests.
-
-If Apple Command Line Tools are missing, finish the installation dialog and rerun the command. Network access is required for GitHub, craft-libs, crates.io and Rust downloads. Dependencies use Cargo.lock. Logs are retained inside the kit's logs folder; share the complete build log after a failure. The source archive and build cache remain available for retries.
-
-Manual checks:
-1. Confirm MIDI 1, Drum Rack, Audio 1 input 1, visible I/O columns, browser, bottom devices and Purple G icon on startup.
-2. Press Cmd+= from Edit and while a text field is focused. Confirm a separate mixer opens or focuses and Edit stays visible. Close the mixer and reopen it.
-3. In Setup > Playback Engine select the intended input/output devices, rate and buffer. Confirm the available physical input channels. Before arming Audio 1, speak into the assigned physical input and verify live input metering. Check the actual input device name and channel count. Change the input assignment and confirm the meter follows that channel. Enable Monitor to hear input; disable it when using interface direct monitoring.
-4. Load different samples on two Drum Rack pads. Click each pad to audition with the playhead stopped. Confirm the correct sample and pad controls; check parameter undo.
-5. Create a MIDI clip on MIDI 1 and program notes 36..51. Check quarter, sixteenth and triplet snapping, dragging, resizing, quantization and selection across clip changes.
-6. Expand a developer group, switch to Effect, and filter AU then VST3. Check that compressors and EQs are grouped with similar devices and both formats remain separately selectable. Search by developer and effect, then drag an effect into Track Devices and double-click another. Confirm devices append without replacing earlier inserts. Adjust their controls and undo.
-7. Save and reopen a session with pad assignments and effects. Verify samples, MIDI playback, routing and device settings survive.
-8. Record two audio tracks on distinct physical inputs. Confirm isolated takes and correct channel assignments after reopening. Unavailable/no-input recording must report a routing error. Internal bus recording remains unavailable.
-9. Open a hosted plugin editor, adjust track volume/pan and clip gain, and bounce a short selection. Inspect meters and audio output.
-10. Check the layout on your actual screen size and verify no panels obscure the timeline or essential controls.
-
-Ready for diagnostic testing only. Rust compilation and tests, macOS launch, microphone permissions, hardware I/O, plugin hosting and icon conversion were not executed during preparation. Added regression tests are present in source but unrun here.
-
-Current UI update:
-The rack uses Ableton-style pad order and octave labels, with C1 at MIDI note 36 and D#2 at note 51. The empty rack has a clickable library-assignment area to its right. Choose your own drum sample folder; the folder persists in preferences. Empty racks receive up to 16 distinct randomly chosen samples from that folder. Existing pad assignments are preserved. Load random kit explicitly replaces the kit in one undo step. Library traversal and file sizes are bounded; no audio files are bundled or fetched externally. A populated rack shows the selected pad waveform, sample loading, tuning, pan, gain and mute controls.
-
-Light appearance is the default, with a one-time migration of old appearance preferences. New GDAW sessions use an eighth-note grid and Bars|Beats. Subdivision lines are half-point strokes and remain visible down to two pixels between lines. Existing session grid settings remain saved with each session.
-
-Cmd+= now shows or hides the separate mixer while keeping Edit in the main window. Mac corrections include Cmd+1..7 tools, Smart Tool F-key combinations, Cmd+[ and Cmd+] zoom, Commands Focus R/T zoom, Control+1..5 zoom presets, Control+E Zoom Toggle, Return navigation, Control+Shift+S search, Control+Shift+K shortcut list and MIDI/Score editor shortcuts.
-
-Complete Pro Tools shortcut parity is unfinished. The egui input layer does not preserve all number-row versus keypad distinctions. Keypad-only windows and keypad Enter require a native input bridge; their labels identify the intended keypad assignments. Commands for features absent in GDAW remain unavailable. This update does not claim a complete reproduction of Ableton Drum Rack, per-pad effect chains or its entire sample-editor feature set.
-
-Native VST3/CLAP discovery remains isolated in per-bundle helper processes. Runtime plugin processing after insertion remains in-process.
-
-Regression tests were added but not executed during source preparation. This source revision needs a Mac compile, UI checks and microphone/hardware testing.
-
-EDIT/MIX AUDIT UPDATE
-
-Pinned source aeb3a7d2930262a8c468df4b5b6307ac4a6838a3 adds distinct Inserts A-E and Sends A-E to both starter tracks, keeps all five slots visible at medium heights, accepts browser effects in exact insert slots, shares developer/effect/format menus with the browser, adds Edit I/O fader/pan controls, and prevents mixer section overlap with vertical scrolling. Old preferences get a one-time visible-column migration. New sessions use absolute eighth-note Grid mode.
-
-The source audit and remaining gaps are in docs/GDAW_EDIT_MIX_AUDIT_2026-10-14.md. Syntax parsing and shell syntax checks were performed; no Rust tests, app compilation or hardware testing were run while preparing this update. Full Pro Tools shortcut parity and the complete Ableton Drum Rack feature set remain unfinished. This source pin is not a production-readiness certification.
-
-DRUM RACK RELIABILITY FOLLOW-UP
-
-Native drum-library discovery runs in a cancellable background worker. Changing or clearing the library discards old results; Rescan drum library retries discovery. Random kits skip unreadable files and fill available pads in order, report the skipped count, and remain one undo step. Explicit kit loads remain strict unless skip_invalid is requested; all-invalid replacements roll back.
-
-Stopped rack previews retire the previous track's one-shot voices when switching tracks. Play/Locate clear stale preview timers. Replacing or clearing a sampler's audio clears MIDI events queued for the old sample.
-
-Eight additional regression tests were added. Seven edited Rust files passed syntax parsing; Rust compilation, tests, Mac window/audio checks were not run here. Sample decoding remains on the existing command path, and stopped audition still has its existing two-second limit.
+Source syntax and manifest checks were performed. Rust compilation, regression execution, visual rendering, Mac launch, native plugins and microphone/interface behavior were not tested here. This is source for diagnostic testing, not a production-readiness certification.
