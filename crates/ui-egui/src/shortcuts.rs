@@ -55,6 +55,7 @@ fn search_chord(m: Modifiers, mac: bool) -> bool {
 
 pub fn handle(app: &mut SoundApp, ctx: &egui::Context) {
     ctx.options_mut(|o| o.zoom_with_keyboard = false);
+    crate::keypad::handle(app, ctx);
     if app.dialogs.open.is_some() {
         return;
     }
@@ -191,7 +192,7 @@ fn fixed(app: &mut SoundApp, key: Key, m: Modifiers, mac: bool) -> bool {
             true
         }
         // Shift+=/- step the Grid value and Alt+Shift+=/- the Nudge value; macOS sends Alt+Shift+= as =, not +.
-        Key::Plus | Key::Equals | Key::Minus if m.shift && !m.command && !m.ctrl && app.ui.window == MainWindow::Edit => {
+        Key::Plus | Key::Equals | Key::Minus if !mac && m.shift && !m.command && !m.ctrl && app.ui.window == MainWindow::Edit => {
             let step = if key == Key::Minus { -1 } else { 1 };
             let _ = app.run(if m.alt { "view.nudge" } else { "view.grid" }, json!({"step": step}));
             true
@@ -245,7 +246,7 @@ fn fixed(app: &mut SoundApp, key: Key, m: Modifiers, mac: bool) -> bool {
             }
             true
         }
-        Key::Plus | Key::Minus if !m.command && app.ui.window == MainWindow::Edit => {
+        Key::Plus | Key::Minus if !mac && !m.command && app.ui.window == MainWindow::Edit => {
             let dir = if key == Key::Plus { 1 } else { -1 };
             let _ = app.run("edit.nudge", json!({"direction": dir}));
             true

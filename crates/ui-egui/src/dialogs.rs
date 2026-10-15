@@ -15,6 +15,7 @@ pub enum Dialog {
     Bounce { path: String, format: String, bit_depth: String, normalize: bool },
     RenameTrack { id: TrackId, name: String },
     RenameClip { id: ClipId, name: String },
+    NewMemoryLocation { name: String, selection: bool, start: Samples, end: Samples },
     RenameMarker { id: soundcraft_model::MarkerId, name: String },
     ClearClips { clips: Vec<ClipId>, sources: Vec<SourceId>, message: String },
     PathPrompt { cmd: String, title: String, path: String, key: String },
@@ -44,6 +45,7 @@ impl Dialogs {
             Dialog::Bounce { .. } => "bounce",
             Dialog::RenameTrack { .. } => "rename_track",
             Dialog::RenameClip { .. } => "rename_clip",
+            Dialog::NewMemoryLocation { .. } => "new_memory_location",
             Dialog::RenameMarker { .. } => "rename_marker",
             Dialog::ClearClips { .. } => "clear_clips",
             Dialog::PathPrompt { .. } => "path",
@@ -84,6 +86,12 @@ impl Dialogs {
         let home = default_dir();
         let name = e.session().name.clone();
         self.open = Some(match id {
+            "markers.add" => {
+                let range = e.session().edit.selection;
+                let start = if e.transport.playing { e.transport.position } else { range.start };
+                Dialog::NewMemoryLocation { name: format!("Marker {}", e.session().markers.len() + 1),
+                    selection: false, start, end: range.end.max(start) }
+            }
             "clip.clear" => {
                 let ed = &e.session().edit;
                 return self.open_clear(e, ed.selected_clips.clone(), ed.selected_sources.clone());
@@ -276,6 +284,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
         Dialog::Bounce { .. } => "Bounce Mix",
         Dialog::RenameTrack { .. } => "Rename Track",
         Dialog::RenameClip { .. } => "Rename Clip",
+        Dialog::NewMemoryLocation { .. } => "New Memory Location",
         Dialog::RenameMarker { .. } => "Rename Marker",
         Dialog::ClearClips { .. } => "Clear",
         Dialog::PathPrompt { title, .. } | Dialog::Number { title, .. } => title.as_str(),
@@ -409,6 +418,17 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                     name_field(ui, name);
                     if buttons(ui, "OK", enter) {
                         action = Some(("clip.rename".into(), json!({"clip": id.0, "name": name})));
+                    }
+                }
+                Dialog::NewMemoryLocation { name, selection, start, end } => {
+                    name_field(ui, name);
+                    crate::widgets::checkbox(ui, selection, "Store time selection");
+                    ui.label(if *selection { format!("Selection: {start} – {end}") } else { format!("Marker: {start}") });
+                    if buttons(ui, "Create", enter) {
+                        action = Some(("markers.add".into(), json!({
+                            "name": name, "kind": if *selection { "selection" } else { "marker" },
+                            "start": start, "end": if *selection { *end } else { *start }
+                        })));
                     }
                 }
                 Dialog::RenameMarker { id, name } => {

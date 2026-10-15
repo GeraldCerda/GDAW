@@ -47,3 +47,5 @@ and, at runtime, the operating system's own UI fonts when available (never redis
 | `docs/images/` | SoundCraft contributors | screenshots of SoundCraft rendered from the synthesised demo session | MIT OR Apache-2.0 |
 
 | `Purple G icon with transparent background.png` | GeraldCerda (provided via repository upload) | GDAW repository | User-provided GDAW branding; included at the owner's direction; no third-party license claimed |
+
+| `support/egui-winit/` | The egui authors | [egui-winit 0.36.2](https://github.com/emilk/egui/tree/0.36.2/crates/egui-winit) | MIT OR Apache-2.0; license texts and origin included in that directory |

@@ -475,7 +475,7 @@ pub fn invoke_shortcut_dialog(app: &mut SoundApp, id: &str) -> bool {
 
 /// Commands that open a dialog first: the listed ones, Score Setup, and anything that needs a path.
 fn wants_dialog(id: &str) -> bool {
-    DIALOG_COMMANDS.contains(&id) || id == "file.score_setup" || crate::dialogs::takes_path(id)
+    DIALOG_COMMANDS.contains(&id) || id == "markers.add" || id == "file.score_setup" || crate::dialogs::takes_path(id)
 }
 
 /// Handle UI-layer commands. Returns None when `id` is not a UI command.

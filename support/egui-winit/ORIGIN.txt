@@ -1,0 +1,5 @@
+Derived from emilk/egui tag 0.36.2, crates/egui-winit.
+https://github.com/emilk/egui/tree/0.36.2/crates/egui-winit
+Copyright the egui authors. MIT OR Apache-2.0; license texts included.
+GDAW change: preserve keypad location through tagged key events consumed by native_keypad_input.
+Source comments are omitted; upstream runtime code is otherwise retained.

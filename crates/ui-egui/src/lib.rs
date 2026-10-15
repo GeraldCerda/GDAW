@@ -27,6 +27,7 @@ mod recent;
 pub mod recovery;
 pub mod sampler_window;
 pub mod score_editor;
+pub mod keypad;
 pub mod shortcuts;
 pub mod spot;
 pub mod theme;
@@ -260,6 +261,7 @@ pub enum Gesture {
 }
 
 pub struct SoundApp {
+    pub(crate) keypad: keypad::KeypadState,
     pub engine: Engine,
     /// The session path as of the last frame, and whether the recent list changed since the host
     /// last saved it (see `recent`).
@@ -404,6 +406,7 @@ impl SoundApp {
             synthetic: Vec::new(),
             sample_drop_targets: Vec::new(),
             pad_drop_targets: Vec::new(),
+            keypad: keypad::KeypadState::default(),
             browser: devices::BrowserState::default(),
             sample_reads: Vec::new(),
             synthetic_grace: 0,
