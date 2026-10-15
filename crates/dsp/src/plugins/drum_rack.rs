@@ -168,6 +168,12 @@ impl Plugin for DrumRack {
         }
     }
 
+    fn process_pad(&mut self, note: u8, io: &mut [Vec<f32>], frames: usize) -> bool {
+        let Some(pad) = Self::pad_index(note).and_then(|index| self.pads.get_mut(index)) else { return false };
+        pad.process(io, frames);
+        true
+    }
+
     fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
         let frames = frames.min(self.scratch.first().map_or(0, Vec::len));
         for channel in io.iter_mut() {

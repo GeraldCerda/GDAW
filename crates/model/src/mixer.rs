@@ -461,6 +461,8 @@ pub struct Insert {
     pub sample: Option<SourceId>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub pad_samples: BTreeMap<u8, SourceId>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pad_effects: BTreeMap<u8, [Option<Insert>; INSERT_SLOTS]>,
 }
 
 fn yes() -> bool {
@@ -478,6 +480,7 @@ impl Insert {
             state: None,
             sample: None,
             pad_samples: BTreeMap::new(),
+            pad_effects: BTreeMap::new(),
         }
     }
 
@@ -739,5 +742,19 @@ mod tests {
     fn formats() {
         assert_eq!(ChannelFormat::for_channels(6), ChannelFormat::Surround51);
         assert_eq!(ChannelFormat::from_id("stereo"), Some(ChannelFormat::Stereo));
+    }
+}
+
+#[cfg(test)]
+mod pad_chain_compatibility_tests {
+    use super::*;
+
+    #[test]
+    fn instruments_saved_without_pad_effects_still_load() {
+        let rack = Insert::new("drum_rack");
+        let mut value = serde_json::to_value(&rack).unwrap();
+        value.as_object_mut().unwrap().remove("pad_effects");
+        let loaded: Insert = serde_json::from_value(value).unwrap();
+        assert_eq!(loaded,rack);
     }
 }

@@ -661,6 +661,12 @@ impl SoundApp {
             if slot == soundcraft_mix::INSTRUMENT_SLOT {
                 continue;
             }
+            if let Some((note, index)) = soundcraft_mix::decode_drum_pad_slot(slot) {
+                let _ = self.engine.execute_merged("mix.drum_pad_effect",
+                    &json!({"track":t.0,"note":note,"slot":index,"action":"param","param":param,"value":value}),
+                    &format!("pad-effect:{}:{note}:{index}:{param}", t.0));
+                continue;
+            }
             let key = format!("param:{}:{slot}:{param}", t.0);
             let _ = self.engine.execute_merged("mix.insert_param", &json!({"track": t.0, "slot": slot, "param": param, "value": value}), &key);
         }
@@ -1446,7 +1452,10 @@ fn feed_meter(d: &mut MeterDisplay, peak: [f32; 2], gr: f32, dt: f32) {
 /// [`soundcraft_mix::INSTRUMENT_SLOT`]), which the engine took out of the signal path.
 fn failed_plugin_status(s: &soundcraft_model::Session, track: TrackId, slot: usize) -> Option<String> {
     let t = s.track(track)?;
-    let ins = if slot == soundcraft_mix::INSTRUMENT_SLOT { t.instrument.as_ref() } else { t.mixer.inserts.get(slot)?.as_ref() }?;
+    let ins = if slot == soundcraft_mix::INSTRUMENT_SLOT { t.instrument.as_ref() }
+        else if let Some((note, slot)) = soundcraft_mix::decode_drum_pad_slot(slot) {
+            t.instrument.as_ref()?.pad_effects.get(&note)?.get(slot)?.as_ref()
+        } else { t.mixer.inserts.get(slot)?.as_ref() }?;
     let name = crate::mix_window::plugin_info(&ins.plugin).map_or(ins.plugin.as_str(), |p| p.name);
     Some(format!("{name} on {} put out invalid audio, so it is bypassed until playback stops or starts again.", t.name))
 }

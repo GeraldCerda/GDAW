@@ -27,7 +27,7 @@ const CMD: &str = "mix.insert_state";
 fn slot_param(p: &Value) -> Result<Option<usize>> {
     let v = p.get("slot").ok_or_else(|| bad(CMD, "`slot` required"))?;
     if let Some(n) = v.as_u64() {
-        return usize::try_from(n).ok().filter(|&n| n < INSERT_SLOTS).map(Some).ok_or_else(|| bad(CMD, "slot out of range"));
+        return usize::try_from(n).ok().filter(|&n| n < INSERT_SLOTS || soundcraft_mix::decode_drum_pad_slot(n).is_some()).map(Some).ok_or_else(|| bad(CMD, "slot out of range"));
     }
     let s = v.as_str().map(|s| s.trim().to_ascii_lowercase()).ok_or_else(|| bad(CMD, "`slot` must be a number or a letter"))?;
     if s == "instrument" {
@@ -50,7 +50,10 @@ fn insert_state(e: &mut Engine, p: &Value) -> Result<Value> {
     let s = e.session_mut();
     let tr = s.track_mut(t).ok_or_else(|| bad(CMD, "no track"))?;
     let ins = match slot {
-        Some(i) => tr.mixer.inserts.get_mut(i).and_then(Option::as_mut),
+        Some(i) => if let Some((note, slot)) = soundcraft_mix::decode_drum_pad_slot(i) {
+            tr.instrument.as_mut().and_then(|instrument| instrument.pad_effects.get_mut(&note))
+                .and_then(|slots| slots.get_mut(slot)).and_then(Option::as_mut)
+        } else { tr.mixer.inserts.get_mut(i).and_then(Option::as_mut) },
         None => tr.instrument.as_mut(),
     }
     .ok_or_else(|| bad(CMD, "empty slot"))?;

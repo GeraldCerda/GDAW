@@ -307,7 +307,7 @@ pub fn browser(app: &mut SoundApp, ui: &mut Ui) {
 fn device(app: &mut SoundApp, ui: &mut Ui, track: TrackId, slot: usize, insert: &Insert) {
     let instrument = slot == soundcraft_mix::INSTRUMENT_SLOT;
     let name = crate::mix_window::plugin_info(&insert.plugin).map_or(insert.plugin.as_str(), |info| info.name).to_string();
-    let rack_width = if insert.plugin == "drum_rack" { if insert.pad_samples.is_empty() { 420.0 } else { 620.0 } } else { 250.0 };
+    let rack_width = if insert.plugin == "drum_rack" { if insert.pad_samples.is_empty() { 720.0 } else { 920.0 } } else { 250.0 };
     ui.set_min_width(rack_width);
     ui.set_max_width(rack_width + 20.0);
     ui.horizontal(|ui| {
@@ -376,7 +376,7 @@ fn rack(app: &mut SoundApp, ui: &mut Ui, track: TrackId, insert: &Insert) {
                         }
                         if let Some(item) = response.dnd_release_payload::<BrowserItem>() {
                             app.browser.pad = note;
-                            insert_item(app, track, &item);
+                            pad_item(app, track, note, None, &item);
                         }
                         if let Some(source) = response.dnd_release_payload::<crate::DragSource>() {
                             let _ = app.run("mix.drum_pad_load", json!({"track": track.0, "note": note, "source": source.0}));
@@ -432,6 +432,9 @@ fn rack(app: &mut SoundApp, ui: &mut Ui, track: TrackId, insert: &Insert) {
                 }
             });
         });
+        ui.separator();
+        let selected_pad = app.browser.pad;
+        pad_effects(app, ui, track, insert, selected_pad);
     });
 }
 
@@ -465,7 +468,7 @@ fn pad_waveform(app: &mut SoundApp, ui: &mut Ui, track: TrackId, note: u8, sourc
     }
     if let Some(item) = response.dnd_release_payload::<BrowserItem>() {
         app.browser.pad = note;
-        insert_item(app, track, &item);
+        pad_item(app, track, note, None, &item);
     }
     if let Some(source) = response.dnd_release_payload::<crate::DragSource>() {
         let _ = app.run("mix.drum_pad_load", json!({"track": track.0, "note": note, "source": source.0}));
@@ -820,4 +823,101 @@ mod library_scan_tests {
         }
         std::fs::remove_dir(root).unwrap();
     }
+}
+
+fn pad_item(app: &mut SoundApp, track: TrackId, note: u8, slot: Option<usize>, item: &BrowserItem) {
+    let result = match item {
+        BrowserItem::Sample(path) => app.run("mix.drum_pad_load", json!({"track":track.0,"note":note,"path":path})),
+        BrowserItem::Plugin(plugin) => {
+            let mut params = json!({"track":track.0,"note":note,"action":"insert","plugin":plugin});
+            if let Some(slot) = slot { params["slot"] = json!(slot); }
+            app.run("mix.drum_pad_effect", params)
+        }
+        BrowserItem::Preset(plugin, path) => {
+            let preset = std::fs::metadata(path).ok().filter(|metadata| metadata.len() <= 1_048_576)
+                .and_then(|_| std::fs::read(path).ok()).and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+            if let Some(preset) = preset.filter(|preset| preset["format"] == "soundcraft-plugin-preset" && preset["plugin"] == plugin.as_str()) {
+                let mut params = json!({"track":track.0,"note":note,"action":"insert","plugin":plugin,"params":preset["params"]});
+                if let Some(slot) = slot { params["slot"] = json!(slot); }
+                app.run("mix.drum_pad_effect", params)
+            } else {
+                Err("The preset is unreadable or does not match its device".into())
+            }
+        }
+    };
+    app.ui.status = match result { Ok(_) => format!("Loaded on pad {}", drum_note_name(note)), Err(error) => error };
+}
+
+fn pad_effects(app: &mut SoundApp, ui: &mut Ui, track: TrackId, instrument: &Insert, note: u8) {
+    ui.vertical(|ui| {
+        ui.set_min_width(270.0);
+        ui.set_max_width(280.0);
+        ui.strong(format!("{} · Effect chain", drum_note_name(note)));
+        prepare_plugins(app);
+        egui::ScrollArea::vertical().id_salt(("pad_effects",track.0,note)).max_height(190.0).show(ui, |ui| {
+            let slots = instrument.pad_effects.get(&note);
+            for slot in 0..soundcraft_model::INSERT_SLOTS {
+                let insert = slots.and_then(|slots| slots.get(slot)).and_then(Option::as_ref);
+                ui.push_id(("pad_effect",track.0,note,slot), |ui| {
+                    let response = egui::Frame::NONE.fill(Tokens::current().panel_bg)
+                        .stroke(egui::Stroke::new(1.0, Tokens::current().border)).inner_margin(3.0).show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.strong(format!("{} ·", (b'A' + slot as u8) as char));
+                            if let Some(insert) = insert {
+                                let name = crate::mix_window::plugin_info(&insert.plugin).map_or(insert.plugin.as_str(), |info| info.name);
+                                if ui.small_button(if insert.bypass { "Off" } else { "On" }).clicked() {
+                                    let _ = app.run("mix.drum_pad_effect", json!({"track":track.0,"note":note,"slot":slot,"action":"bypass"}));
+                                }
+                                ui.label(name).on_hover_text(format!("{name} · pad {} · slot {}", drum_note_name(note), slot + 1));
+                                if ui.small_button("×").on_hover_text("Remove this pad effect").clicked() {
+                                    let _ = app.run("mix.drum_pad_effect", json!({"track":track.0,"note":note,"slot":slot,"action":"remove"}));
+                                }
+                            } else {
+                                ui.menu_button("Add effect…", |ui| {
+                                    let groups = crate::plugin_browser::groups(&app.browser.plugins, app.browser.grouping, app.browser.format, Some(false), &app.browser.query);
+                                    for (group, effects) in groups {
+                                        ui.menu_button(group, |ui| {
+                                            for effect in effects {
+                                                if soundcraft_dsp::is_generator(&effect.id) { continue; }
+                                                if ui.button(format!("{} · {}", effect.name, effect.format.label())).clicked() {
+                                                    pad_item(app, track, note, Some(slot), &BrowserItem::Plugin(effect.id.clone()));
+                                                    ui.close();
+                                                }
+                                            }
+                                        });
+                                    }
+                                });
+                            }
+                        });
+                        if let Some(insert) = insert {
+                            ui.horizontal(|ui| {
+                                if soundcraft_mix::is_third_party(&insert.plugin) && ui.small_button("Open editor").clicked()
+                                    && let (Some(player), Some(address)) = (&app.player, soundcraft_mix::drum_pad_slot(note,slot))
+                                    && let Err(error) = player.open_editor(track,address)
+                                { app.ui.status = error; }
+                            });
+                            if let Some(info) = crate::mix_window::plugin_info(&insert.plugin) {
+                                egui::CollapsingHeader::new("Parameters").id_salt("parameters").show(ui, |ui| {
+                                    for parameter in info.params {
+                                        let mut value = insert.params.get(parameter.id).copied().unwrap_or(parameter.default);
+                                        if ui.add(egui::Slider::new(&mut value,parameter.min..=parameter.max).logarithmic(parameter.taper == soundcraft_dsp::Taper::Log).text(parameter.name)).changed() {
+                                            let _ = app.engine.execute_merged("mix.drum_pad_effect",
+                                                &json!({"track":track.0,"note":note,"slot":slot,"action":"param","param":parameter.id,"value":value}),
+                                                &format!("pad-effect:{}:{note}:{slot}:{}",track.0,parameter.id));
+                                            if let (Some(player),Some(address)) = (&app.player,soundcraft_mix::drum_pad_slot(note,slot)) {
+                                                player.editor_set_param(track,address,parameter.id,value);
+                                            }
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                    });
+                    let drop = ui.interact(response.response.rect,ui.id().with("drop"),Sense::hover());
+                    if let Some(item) = drop.dnd_release_payload::<BrowserItem>() { pad_item(app,track,note,Some(slot),&item); }
+                });
+            }
+        });
+        ui.weak("Drop an effect into A–J · before track inserts");
+    });
 }

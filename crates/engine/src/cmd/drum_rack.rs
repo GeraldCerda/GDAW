@@ -5,6 +5,7 @@ use soundcraft_model::{Insert, SourceId, TrackKind};
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
+        cmd!("mix.drum_pad_effect", "Edit Drum Pad Effect", [], None, "{track?, note: 36..51, slot?: 0..9, action: insert|remove|bypass|param, plugin?, params?, param?, value?}", has_selection, effect),
         cmd!("mix.drum_kit_load", "Load Drum Kit", [], None, "{track?, paths: [audio paths], replace?: false, skip_invalid?: false}", has_selection, kit),
         cmd!("mix.drum_pad_load", "Load Drum Pad", [], None, "{track?, note: 36..51, path?|source?}", has_selection, load),
         cmd!(noundo "mix.drum_pad_audition", "Audition Drum Pad", [], None, "{track?, note: 36..51}", has_selection, audition),
@@ -131,6 +132,62 @@ fn param(engine: &mut Engine, params: &Value) -> Result<Value> {
         track.instrument = Some(insert);
     }
     Ok(json!({"track": track, "note": note, "param": name, "value": value}))
+}
+
+fn effect(engine: &mut Engine, params: &Value) -> Result<Value> {
+    let command = "mix.drum_pad_effect";
+    let (track, note, mut instrument) = target(engine, params, command)?;
+    let action = str_param(params, "action").ok_or_else(|| bad(command, "action required"))?;
+    let slots = instrument.pad_effects.entry(note).or_insert_with(|| std::array::from_fn(|_| None));
+    let slot = match params.get("slot") {
+        Some(value) => value.as_u64().and_then(|value| usize::try_from(value).ok()).filter(|slot| *slot < slots.len())
+            .ok_or_else(|| bad(command, "slot must be 0..9"))?,
+        None if action == "insert" => slots.iter().position(Option::is_none).ok_or_else(|| bad(command, "all pad effect slots are in use"))?,
+        None => return Err(bad(command, "slot required")),
+    };
+    match action {
+        "insert" => {
+            let plugin = str_param(params, "plugin").ok_or_else(|| bad(command, "plugin required"))?;
+            let info = super::clap::plugin_info(plugin).ok_or_else(|| bad(command, "unknown effect"))?;
+            if info.is_instrument || soundcraft_dsp::is_generator(plugin) {
+                return Err(bad(command, "choose an audio effect for this pad"));
+            }
+            let mut insert = Insert::new(plugin);
+            for parameter in info.params { insert.params.insert(parameter.id.into(), parameter.default); }
+            if let Some(values) = params.get("params") {
+                let values = values.as_object().ok_or_else(|| bad(command, "params must be an object"))?;
+                for (name, value) in values {
+                    let parameter = info.param(name).ok_or_else(|| bad(command, format!("unknown parameter {name}")))?;
+                    let value = value.as_f64().filter(|value| value.is_finite()).ok_or_else(|| bad(command, "finite parameter value required"))?;
+                    insert.params.insert(name.clone(), parameter.clamp(value as f32));
+                }
+            }
+            if let Some(target) = slots.get_mut(slot) { *target = Some(insert); }
+        }
+        "remove" => {
+            if let Some(target) = slots.get_mut(slot) { *target = None; }
+        }
+        "bypass" | "param" => {
+            let insert = slots.get_mut(slot).and_then(Option::as_mut).ok_or_else(|| bad(command, "empty pad effect slot"))?;
+            if action == "bypass" {
+                insert.bypass = match params.get("value") {
+                    None => !insert.bypass,
+                    Some(value) => value.as_bool().ok_or_else(|| bad(command, "bypass value must be boolean"))?,
+                };
+            } else {
+                let name = str_param(params, "param").ok_or_else(|| bad(command, "param required"))?;
+                let value = params.get("value").and_then(Value::as_f64).filter(|value| value.is_finite())
+                    .ok_or_else(|| bad(command, "finite parameter value required"))?;
+                let parameter = super::clap::plugin_info(&insert.plugin).and_then(|info| info.param(name))
+                    .ok_or_else(|| bad(command, "unknown effect parameter"))?;
+                insert.params.insert(name.into(), parameter.clamp(value as f32));
+            }
+        }
+        _ => return Err(bad(command, "unknown pad effect action")),
+    }
+    instrument.pad_effects.retain(|_, slots| slots.iter().any(Option::is_some));
+    if let Some(track) = engine.session_mut().track_mut(track) { track.instrument = Some(instrument); }
+    Ok(json!({"track":track,"note":note,"slot":slot}))
 }
 
 #[cfg(test)]
@@ -263,5 +320,79 @@ mod tolerant_kit_tests {
         engine.execute("edit.undo", &json!({})).unwrap();
         assert_eq!(engine.session(), &before);
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod pad_effect_tests {
+    use super::*;
+    use soundcraft_audio_io::{AudioBuffer, FileFormat};
+    use soundcraft_model::ChannelFormat;
+
+    fn fixture() -> (Engine, TrackId) {
+        let mut engine = Engine::default();
+        let track = engine.session_mut().add_track(TrackKind::Instrument, ChannelFormat::Stereo, Some("Rack"));
+        engine.execute("mix.instrument", &json!({"track":track.0,"plugin":"drum_rack"})).unwrap();
+        let source = crate::io::add_source(engine.session_mut(), "Pad",
+            AudioBuffer { sample_rate:48_000, channels:vec![vec![0.25;48_000]] }, None, FileFormat::Wav);
+        for note in [36,37] {
+            engine.execute("mix.drum_pad_load",&json!({"track":track.0,"note":note,"source":source.0})).unwrap();
+        }
+        (engine,track)
+    }
+
+    fn preview(engine: &Engine, track: TrackId, note: u8) -> f32 {
+        let mut mixer = soundcraft_mix::MixEngine::new(engine.session().sample_rate.as_f64() as f32,128);
+        mixer.monitor_only = true;
+        mixer.audition(engine.session(),track,note);
+        let mut audio = vec![vec![0.0;128];2];
+        for _ in 0..128 { mixer.render(engine.session(),0,128,&mut audio); }
+        audio.iter().flatten().fold(0.0f32,|peak,sample|peak.max(sample.abs()))
+    }
+
+    #[test]
+    fn effects_process_only_their_pad_bypass_remove_and_undo_restore_the_signal() {
+        let (mut engine,track) = fixture();
+        let dry = preview(&engine,track,36);
+        engine.execute("mix.drum_pad_effect",&json!({"track":track.0,"note":36,"slot":4,"action":"insert","plugin":"gain","params":{"gain":-12.0}})).unwrap();
+        let wet = preview(&engine,track,36);
+        assert!(wet < dry * 0.27 && wet > dry * 0.23);
+        assert!((preview(&engine,track,37)-dry).abs()<1e-5);
+        engine.execute("mix.drum_pad_effect",&json!({"track":track.0,"note":36,"slot":4,"action":"bypass"})).unwrap();
+        assert!((preview(&engine,track,36)-dry).abs()<1e-5);
+        engine.execute("edit.undo",&json!({})).unwrap();
+        assert!((preview(&engine,track,36)-wet).abs()<1e-5);
+        engine.execute("mix.drum_pad_effect",&json!({"track":track.0,"note":36,"slot":4,"action":"remove"})).unwrap();
+        assert!((preview(&engine,track,36)-dry).abs()<1e-5);
+        engine.execute("edit.undo",&json!({})).unwrap();
+        assert!((preview(&engine,track,36)-wet).abs()<1e-5);
+    }
+
+    #[test]
+    fn pad_effects_round_trip_and_invalid_edits_preserve_the_session() {
+        let (mut engine,track) = fixture();
+        engine.execute("mix.drum_pad_effect",&json!({"track":track.0,"note":36,"slot":9,"action":"insert","plugin":"gain"})).unwrap();
+        engine.execute("mix.drum_pad_effect",&json!({"track":track.0,"note":36,"slot":9,"action":"param","param":"gain","value":-9.0})).unwrap();
+        let blob = soundcraft_model::b64::encode(b"pad editor state");
+        let address = soundcraft_mix::drum_pad_slot(36,9).unwrap();
+        engine.execute("mix.insert_state",&json!({"track":track.0,"slot":address,"state":blob})).unwrap();
+        let saved = serde_json::to_string(engine.session()).unwrap();
+        let reopened: soundcraft_model::Session = serde_json::from_str(&saved).unwrap();
+        assert_eq!(reopened.track(track).unwrap().instrument,engine.session().track(track).unwrap().instrument);
+        let before = engine.session().clone();
+        for params in [
+            json!({"note":35,"slot":0,"action":"insert","plugin":"gain"}),
+            json!({"note":36,"slot":10,"action":"insert","plugin":"gain"}),
+            json!({"note":36,"slot":0,"action":"insert","plugin":"sampler"}),
+            json!({"note":36,"slot":0,"action":"insert","plugin":"unknown"}),
+            json!({"note":36,"slot":0,"action":"insert","plugin":"gain","params":{"gain":"loud"}}),
+            json!({"note":36,"slot":9,"action":"param","param":"unknown","value":0}),
+            json!({"note":36,"slot":9,"action":"bypass","value":1}),
+        ] {
+            let mut params = params;
+            params["track"] = json!(track.0);
+            assert!(engine.execute("mix.drum_pad_effect",&params).is_err());
+            assert_eq!(engine.session(),&before);
+        }
     }
 }

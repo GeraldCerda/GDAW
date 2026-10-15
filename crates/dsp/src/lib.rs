@@ -232,6 +232,9 @@ pub trait Plugin: Send {
     fn set_sample(&mut self, _sample: Option<Arc<dyn SampleSource>>) -> bool {
         false
     }
+    fn process_pad(&mut self, _note: u8, _io: &mut [Vec<f32>], _frames: usize) -> bool {
+        false
+    }
     fn set_pad_sample(&mut self, _note: u8, _sample: Option<Arc<dyn SampleSource>>) -> bool {
         false
     }

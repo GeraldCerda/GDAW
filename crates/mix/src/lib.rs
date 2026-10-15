@@ -50,6 +50,8 @@
 //! [`Insert::sample`]: soundcraft_model::Insert::sample
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod pad_fx;
+
 use soundcraft_dsp::pan::{PanLaw, SpeakerPos, SurroundParams, gains};
 use soundcraft_dsp::{Plugin, SampleSource, Transport, db_to_gain};
 use soundcraft_midi::CtrlKind;
@@ -75,6 +77,16 @@ pub fn main_channels(s: &Session) -> usize {
 /// Slot index used for a track's instrument plugin in [`InstanceSpec`] and [`PreparedInstance`]
 /// (insert slots use their index).
 pub const INSTRUMENT_SLOT: usize = usize::MAX;
+
+pub fn drum_pad_slot(note: u8, slot: usize) -> Option<usize> {
+    let index = note.checked_sub(36).filter(|index| *index < 16)?;
+    (slot < soundcraft_model::INSERT_SLOTS).then(|| 256 + usize::from(index) * soundcraft_model::INSERT_SLOTS + slot)
+}
+
+pub fn decode_drum_pad_slot(address: usize) -> Option<(u8, usize)> {
+    let index = address.checked_sub(256)?;
+    (index < 16 * soundcraft_model::INSERT_SLOTS).then_some(((36 + index / soundcraft_model::INSERT_SLOTS) as u8, index % soundcraft_model::INSERT_SLOTS))
+}
 
 /// Hosted third-party plugin ids (CLAP or VST3): created off the audio thread in realtime use.
 pub fn is_third_party(id: &str) -> bool {
@@ -118,6 +130,20 @@ pub fn instance_specs(s: &Session) -> Vec<InstanceSpec> {
                 && is_third_party(&ins.plugin)
             {
                 out.push(InstanceSpec { track: t.id, slot: i, id: ins.plugin.clone(), ch, state: ins.state_bytes() });
+            }
+        }
+        if let Some(instrument) = &t.instrument
+            && instrument.plugin == "drum_rack"
+        {
+            for (note, slots) in &instrument.pad_effects {
+                for (index, insert) in slots.iter().enumerate() {
+                    if let Some(insert) = insert
+                        && is_third_party(&insert.plugin)
+                        && let Some(slot) = drum_pad_slot(*note, index)
+                    {
+                        out.push(InstanceSpec { track: t.id, slot, id: insert.plugin.clone(), ch: ch.max(2), state: insert.state_bytes() });
+                    }
+                }
             }
         }
         if let Some(ins) = &t.instrument
@@ -225,6 +251,7 @@ struct Strip {
     /// The pool audio handed to the instrument with `set_sample` (sample-playing instruments).
     sample: Option<Arc<SourceAudio>>,
     pad_samples: [Option<Arc<SourceAudio>>; 16],
+    pad_effects: pad_fx::PadEffects,
     /// MIDI notes currently sounding on the instrument (pitch), for note-offs at stops/seek.
     held: Vec<u8>,
     /// The instrument's next block starts somewhere new: send it the controllers in effect there.
@@ -311,6 +338,7 @@ impl Strip {
             instrument: None,
             sample: None,
             pad_samples: std::array::from_fn(|_| None),
+            pad_effects: pad_fx::PadEffects::default(),
             held: Vec::new(),
             chase: true,
             muted: false,
@@ -482,6 +510,7 @@ impl MixEngine {
         for st in self.strips.values_mut() {
             out.extend(st.plugins.iter_mut().filter_map(Option::take).map(|s| s.plugin));
             out.extend(st.instrument.take().map(|s| s.plugin));
+            st.pad_effects.drain(&mut out);
         }
         out.extend(self.adopt.drain().map(|(_, p)| p.plugin));
         self.synced = (usize::MAX, usize::MAX, usize::MAX);
@@ -515,6 +544,7 @@ impl MixEngine {
                 i.plugin.reset();
                 i.failed = false;
             }
+            s.pad_effects.reset();
             s.held.clear();
             s.chase = true;
             s.align.clear();
@@ -542,6 +572,7 @@ impl MixEngine {
                     cx.retire(p);
                 }
                 cx.retire(st.instrument.take());
+                st.pad_effects.retire(&mut cx);
             }
         }
         for t in &s.tracks {
@@ -582,6 +613,7 @@ impl MixEngine {
             }
             sync_sample(strip, want, s);
             sync_pad_samples(strip, want, s);
+            strip.pad_effects.sync(&mut cx, t, ich);
         }
         // Instances nobody claimed (the session changed again before they arrived).
         let leftovers: Vec<(TrackId, usize)> = cx.adopt.keys().copied().collect();
@@ -628,12 +660,14 @@ impl MixEngine {
             return 0;
         }
         let Some(strip) = self.strips.get_mut(&track) else { return 0 };
+        strip.pad_effects.prepare(model);
         let Some(slot) = strip.instrument.as_mut() else { return 0 };
         apply_params(slot, instrument, model, INSTRUMENT_SLOT, 0);
         let mut frames = slot.plugin.note_tail_samples(note);
         if instrument.plugin != "drum_rack" {
             frames = frames.max((session.sample_rate.as_f64() * 2.0) as usize);
         }
+        frames = frames.saturating_add(strip.pad_effects.tail(instrument, note));
         slot.plugin.note_on(0, note, 127);
         for (effect, insert) in strip.plugins.iter().zip(&model.mixer.inserts) {
             if let (Some(effect), Some(insert)) = (effect, insert)
@@ -648,9 +682,10 @@ impl MixEngine {
 
     pub fn end_audition(&mut self) {
         if let Some(track) = self.audition_track.take()
-            && let Some(slot) = self.strips.get_mut(&track).and_then(|strip| strip.instrument.as_mut())
+            && let Some(strip) = self.strips.get_mut(&track)
         {
-            slot.plugin.reset();
+            if let Some(slot) = strip.instrument.as_mut() { slot.plugin.reset(); }
+            strip.pad_effects.reset();
         }
     }
 
@@ -953,6 +988,7 @@ fn process_strip(
         c.iter_mut().take(frames).for_each(|x| *x = 0.0);
     }
     let transport = transport_at(s, pos, !live.monitor_only, live.recording);
+    if strip.pad_effects.enabled { strip.pad_effects.prepare(t); }
     match t.kind {
         TrackKind::Audio if !live.input.is_empty() && t.mixer.input_monitor => {
             // Input monitoring: the track hears its hardware input instead of its clips.
@@ -1021,7 +1057,7 @@ fn process_strip(
             }
         }
         TrackKind::Instrument | TrackKind::Midi => {
-            if let Some(inst) = strip.instrument.as_mut().filter(|i| !i.failed) {
+            if let Some(inst) = strip.instrument.as_mut().filter(|i| !i.failed && t.instrument.as_ref().is_some_and(|insert| insert.active && !insert.bypass)) {
                 // #152: push the instrument's stored parameter values into the live plugin
                 // before processing, the same way inserts do below. Without this, the values
                 // loaded from a session (or set via `mix.insert_state`) never reach the plugin
@@ -1037,7 +1073,11 @@ fn process_strip(
                     }
                     schedule_notes(s, t, pos, frames, inst, &mut strip.held);
                 }
-                if strip.buf.len() >= 2 {
+                if inst.id == "drum_rack" && strip.pad_effects.enabled {
+                    if let Some(model) = &t.instrument {
+                        strip.pad_effects.process(inst, model, &transport, &mut strip.buf, frames, &mut strip.failures);
+                    }
+                } else if strip.buf.len() >= 2 {
                     inst.plugin.process(&mut strip.buf, frames);
                 } else if let Some(c0) = strip.buf.first_mut() {
                     // Mono MIDI track: render the instrument in stereo and fold.
@@ -1064,7 +1104,7 @@ fn process_strip(
         }
     }
     let mut gr = 0.0f32;
-    let mut latency = 0usize;
+    let mut latency = strip.pad_effects.latency;
     for (i, ins) in t.mixer.inserts.iter().enumerate() {
         let (Some(ins), Some(Some(slot))) = (ins, strip.plugins.get_mut(i)) else { continue };
         if !ins.active || ins.bypass || slot.failed {
@@ -1268,6 +1308,12 @@ fn structure_fingerprint(s: &Session) -> usize {
         }
         t.instrument.as_ref().map(|x| x.plugin.as_str()).hash(&mut h);
         if let Some(instrument) = &t.instrument {
+            for (note, slots) in &instrument.pad_effects {
+                note.hash(&mut h);
+                for slot in slots {
+                    slot.as_ref().map(|insert| insert.plugin.as_str()).hash(&mut h);
+                }
+            }
             for (note, source) in &instrument.pad_samples {
                 note.hash(&mut h);
                 source.hash(&mut h);
@@ -1704,7 +1750,8 @@ fn sync_sample(strip: &mut Strip, want: Option<&soundcraft_model::Insert>, s: &S
 
 /// Record insert latency without processing audio, so this block can compensate for it.
 fn note_insert_latency(t: &Track, strip: &mut Strip, pos: Samples) {
-    let mut latency = 0usize;
+    strip.pad_effects.prepare(t);
+    let mut latency = strip.pad_effects.latency;
     for (i, ins) in t.mixer.inserts.iter().enumerate() {
         let (Some(ins), Some(Some(slot))) = (ins, strip.plugins.get_mut(i)) else { continue };
         if !ins.active || ins.bypass {
