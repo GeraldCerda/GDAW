@@ -65,19 +65,20 @@ fn process(e: &mut Engine, p: &Value) -> Result<Value> {
         }
         let channels = e.session().track(track).map_or(1, |t| t.channels());
         crate::io::refuse_longer(e.session(), "audiosuite.process", &clip.name, "process", clip.length, most.min(crate::io::render_limit(channels)))?;
-        let mut audio = soundcraft_mix::render_clips(e.session(), track, clip.range());
-        // Render without the clip's own fades: re-render a copy without fades so they stay editable.
         let mut tmp = e.session().clone();
         if let Some(c) = tmp.find_clip_mut(id) {
             c.fade_in = Default::default();
             c.fade_out = Default::default();
-            c.gain_db = 0.0;
-            c.gain_env.clear();
+            if matches!(name.as_str(), "invert" | "duplicate") {
+                c.gain_db = 0.0;
+                c.gain_env.clear();
+            }
         }
+        tmp.edit.set_flag(&format!("clip_fx.bypass.{}", id.0), true);
         if let Some(pl) = tmp.track_mut(track).and_then(|t| t.playlist_mut()) {
             pl.clips.retain(|c| c.id == id);
-            audio = soundcraft_mix::render_clips(&tmp, track, clip.range());
         }
+        let mut audio = soundcraft_mix::render_clips(&tmp, track, clip.range());
         let srf = sr.as_f64() as f32;
         let out: Vec<Vec<f32>> = match name.as_str() {
             "normalize" => {
@@ -117,17 +118,20 @@ fn process(e: &mut Engine, p: &Value) -> Result<Value> {
         nc.name = new_name;
         nc.content = ClipContent::Audio { source: src, offset: 0 };
         nc.length = i64::try_from(frames).unwrap_or(nc.length);
+        nc.stretch = 1.0;
+        nc.sync_point = nc.sync_point.clamp(0, nc.length.saturating_sub(1));
+        nc.fade_in.len = nc.fade_in.len.min(nc.length);
+        nc.fade_out.len = nc.fade_out.len.min(nc.length);
         // Invert and Duplicate are phase/copy operations. The clip's gain stays a clip gain,
         // the same way its fades stay editable. Other processes bake a new file at unity gain.
         if !matches!(name.as_str(), "invert" | "duplicate") {
             nc.gain_db = 0.0;
             nc.gain_env.clear();
         }
-        if let Some(pl) = s.track_mut(track).and_then(|t| t.playlist_mut()) {
-            pl.clips.retain(|c| c.id != id);
+        if let Some(existing) = s.find_clip_mut(id) {
+            *existing = nc;
+            done += 1;
         }
-        crate::edit::place_clip(s, track, nc);
-        done += 1;
     }
     Ok(json!({"processed": done, "process": name}))
 }
@@ -198,6 +202,39 @@ mod tests {
     }
 
     #[test]
+    fn rendered_stretch_is_not_applied_again_and_other_clips_keep_their_metadata() {
+        let (mut engine, id) = gained_clip();
+        let track = engine.session().tracks[0].id;
+        let original_source = engine.session().find_clip(id).unwrap().1.source().unwrap();
+        let neighbour_id = engine.session_mut().new_clip_id();
+        let neighbour = Clip::audio(neighbour_id, "Neighbour", original_source, 0, 64, 64);
+        engine.session_mut().track_mut(track).unwrap().playlist_mut().unwrap().clips.push(neighbour.clone());
+        engine.session_mut().find_clip_mut(id).unwrap().stretch = 2.0;
+        engine.execute("audiosuite.process", &json!({"process":"time_stretch", "params":{"ratio":2.0}, "clips":[id.0]})).unwrap();
+        let session = engine.session();
+        let (_, processed) = session.find_clip(id).unwrap();
+        assert_eq!(processed.stretch, 1.0);
+        assert_eq!(processed.start, 0);
+        assert_eq!(session.find_clip(neighbour_id).unwrap().1, &neighbour);
+        assert_eq!(session.track(track).unwrap().active_playlist, 0);
+        assert!(session.pool.get(original_source).is_some());
+    }
+
+    #[test]
+    fn offline_gain_bakes_existing_clip_gain_once_and_keeps_clip_effects_editable() {
+        let (mut engine, id) = gained_clip();
+        let clip = engine.session_mut().find_clip_mut(id).unwrap();
+        clip.gain_env.clear();
+        engine.session_mut().edit.values.insert(format!("clip_fx.{}.gain", id.0), -6.0);
+        engine.execute("audiosuite.process", &json!({"process":"gain", "params":{"db":0.0}, "clips":[id.0]})).unwrap();
+        let clip = engine.session().find_clip(id).unwrap().1;
+        assert_eq!(clip.gain_db, 0.0);
+        let sample = engine.session().pool.get(clip.source().unwrap()).unwrap().buffer.channels[0][0];
+        assert!((sample - 0.5 * soundcraft_dsp::db_to_gain(-6.0)).abs() < 1e-6);
+        assert_eq!(engine.session().edit.values.get(&format!("clip_fx.{}.gain", id.0)), Some(&-6.0));
+    }
+
+    #[test]
     fn invert_and_duplicate_keep_clip_gain() {
         let (mut e, id) = gained_clip();
         e.execute("audiosuite.process", &json!({"process": "invert", "clips": [id.0]})).unwrap();
@@ -240,3 +277,4 @@ mod tests {
         assert_eq!(ranges, vec![(0, 32), (32, 64)]);
     }
 }
+

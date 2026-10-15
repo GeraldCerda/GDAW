@@ -215,7 +215,7 @@ impl TempoMap {
             seg_tick = e.tick;
             bpm = e.bpm;
         }
-        acc + (tick - seg_tick) as f64 * Self::samples_per_tick(bpm, sr)
+        acc + (i128::from(tick) - i128::from(seg_tick)) as f64 * Self::samples_per_tick(bpm, sr)
     }
 
     /// Samples → ticks (fractional).
@@ -251,10 +251,13 @@ impl TempoMap {
         for (i, m) in self.meters.iter().enumerate() {
             let next_tick = self.meters.get(i + 1).map(|n| n.tick);
             let tpb = m.ticks_per_bar();
-            let bars_in_seg = next_tick.map(|nt| ((nt - cur_tick) + tpb - 1) / tpb);
+            let bars_in_seg = next_tick.map(|nt| {
+                let span = nt.saturating_sub(cur_tick);
+                span / tpb + i64::from(span % tpb != 0)
+            });
             match bars_in_seg {
-                Some(n) if bar >= cur_bar + n => {
-                    cur_bar += n;
+                Some(n) if bar >= cur_bar.saturating_add(n) => {
+                    cur_bar = cur_bar.saturating_add(n);
                     cur_tick = next_tick.unwrap_or(cur_tick);
                 }
                 _ => return cur_tick.saturating_add((bar - cur_bar).saturating_mul(tpb)),
@@ -268,11 +271,10 @@ impl TempoMap {
         let first = self.meter_at_tick(0);
         if tick < 0 {
             let tpb = first.ticks_per_bar();
-            let bars_back = (-tick + tpb - 1) / tpb;
-            let bar_tick = -bars_back * tpb;
-            let within = tick - bar_tick;
+            let bar = tick.div_euclid(tpb).saturating_add(1);
+            let within = tick.rem_euclid(tpb);
             let beat_t = first.ticks_per_beat();
-            return BarBeat { bar: 1 - bars_back, beat: within / beat_t + 1, tick: within % beat_t };
+            return BarBeat { bar, beat: within / beat_t + 1, tick: within % beat_t };
         }
         let mut bar = 1i64;
         let mut seg_tick = 0i64;
@@ -281,7 +283,8 @@ impl TempoMap {
             if let Some(n) = self.meters.get(i + 1)
                 && tick >= n.tick
             {
-                bar += ((n.tick - seg_tick) + tpb - 1) / tpb;
+                let span = n.tick.saturating_sub(seg_tick);
+                bar = bar.saturating_add(span / tpb + i64::from(span % tpb != 0));
                 seg_tick = n.tick;
                 continue;
             }
@@ -289,7 +292,7 @@ impl TempoMap {
             let bars = rel / tpb;
             let within = rel % tpb;
             let beat_t = m.ticks_per_beat();
-            return BarBeat { bar: bar + bars, beat: within / beat_t + 1, tick: within % beat_t };
+            return BarBeat { bar: bar.saturating_add(bars), beat: within / beat_t + 1, tick: within % beat_t };
         }
         BarBeat { bar, beat: 1, tick: 0 }
     }
@@ -298,7 +301,7 @@ impl TempoMap {
     pub fn tick_at_bar_beat(&self, bb: BarBeat) -> i64 {
         let start = self.bar_start_tick(bb.bar);
         let m = self.meter_at_tick(start);
-        start.saturating_add((bb.beat - 1).max(0).saturating_mul(m.ticks_per_beat())).saturating_add(bb.tick)
+        start.saturating_add(bb.beat.saturating_sub(1).max(0).saturating_mul(m.ticks_per_beat())).saturating_add(bb.tick)
     }
 
     pub fn bar_beat_at(&self, s: Samples, sr: SampleRate) -> BarBeat {
@@ -402,4 +405,15 @@ mod tests {
         assert_eq!(m.bar_beat_at_tick(-TICKS_PER_QUARTER * 4), BarBeat { bar: 0, beat: 1, tick: 0 });
         assert_eq!(m.bar_beat_at_tick(-TICKS_PER_QUARTER), BarBeat { bar: 0, beat: 4, tick: 0 });
     }
+
+    #[test]
+    fn extreme_negative_ticks_do_not_negate_the_minimum_integer() {
+        let map = TempoMap::default();
+        let position = map.bar_beat_at_tick(i64::MIN);
+        assert_eq!(position.bar, i64::MIN.div_euclid(TICKS_PER_QUARTER * 4) + 1);
+        assert!((1..=4).contains(&position.beat));
+        assert!((0..TICKS_PER_QUARTER).contains(&position.tick));
+        assert!(map.tick_to_samples(i64::MIN, SampleRate::HZ_48000) < 0);
+    }
 }
+

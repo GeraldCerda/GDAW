@@ -99,7 +99,8 @@ impl FrameRate {
         if den == 0 {
             return 0;
         }
-        i64::try_from(num.div_euclid(den)).unwrap_or(0)
+        let frames = num.div_euclid(den);
+        i64::try_from(frames).unwrap_or(if frames < 0 { i64::MIN } else { i64::MAX })
     }
 
     /// Sample position of the start of frame `f`.
@@ -108,7 +109,9 @@ impl FrameRate {
         if n == 0 {
             return 0;
         }
-        let v = (i128::from(f) * i128::from(sr.hz()) * i128::from(d) + i128::from(n) / 2) / i128::from(n);
+        let numerator = i128::from(f) * i128::from(sr.hz()) * i128::from(d);
+        let half = i128::from(n) / 2;
+        let v = (numerator + if numerator < 0 { -half } else { half }) / i128::from(n);
         i64::try_from(v).unwrap_or(if v < 0 { i64::MIN } else { i64::MAX })
     }
 
@@ -133,8 +136,8 @@ impl Timecode {
     /// Label for an absolute frame count.
     pub fn from_frames(frames: i64, rate: FrameRate) -> Timecode {
         let negative = frames < 0;
-        let mut f = frames.saturating_abs();
-        let base = rate.nominal().max(1);
+        let mut f = i128::from(frames).abs();
+        let base = i128::from(rate.nominal().max(1));
         if rate.is_drop() {
             // Drop 2 (or 4) labels each minute except every tenth.
             let drop = if base >= 60 { 4 } else { 2 };
@@ -147,7 +150,13 @@ impl Timecode {
         }
         let frames_l = f % base;
         let total_secs = f / base;
-        Timecode { negative, hours: total_secs / 3600, minutes: (total_secs / 60) % 60, seconds: total_secs % 60, frames: frames_l }
+        Timecode {
+            negative,
+            hours: i64::try_from(total_secs / 3600).unwrap_or(i64::MAX),
+            minutes: ((total_secs / 60) % 60) as i64,
+            seconds: (total_secs % 60) as i64,
+            frames: frames_l as i64,
+        }
     }
 
     /// Absolute frame count of this label.
@@ -222,6 +231,24 @@ mod tests {
     }
 
     #[test]
+    fn negative_frame_positions_round_symmetrically() {
+        for rate in FrameRate::ALL {
+            for frame in [1, 2, 17, 10_000, 10_000_000] {
+                assert_eq!(rate.samples_at_frame(-frame, SampleRate::HZ_48000), -rate.samples_at_frame(frame, SampleRate::HZ_48000));
+            }
+        }
+    }
+
+    #[test]
+    fn extreme_drop_frame_counts_round_trip_without_overflow() {
+        for rate in [FrameRate::Fps29_97Drop, FrameRate::Fps59_94Drop] {
+            for frame in [i64::MIN, i64::MAX] {
+                assert_eq!(Timecode::from_frames(frame, rate).to_frames(rate), frame);
+            }
+        }
+    }
+
+    #[test]
     fn drop_frame_labels() {
         let r = FrameRate::Fps29_97Drop;
         // Frame 1800 is the first frame of minute 1 → labelled 00:01:00;02.
@@ -263,3 +290,4 @@ mod tests {
         assert_eq!(feet_frames(48_000, FrameRate::Fps24, sr, 0), (1, 8));
     }
 }
+

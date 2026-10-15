@@ -135,8 +135,12 @@ pub struct AutomationPoint {
 pub struct AutomationLane {
     pub param: AutoParam,
     pub points: Vec<AutomationPoint>,
-    #[serde(default)]
+    #[serde(default = "lane_enabled_by_default")]
     pub enabled: bool,
+}
+
+fn lane_enabled_by_default() -> bool {
+    true
 }
 
 impl AutomationLane {
@@ -146,6 +150,9 @@ impl AutomationLane {
 
     /// Value at `at` (linear interpolation; `default` when empty).
     pub fn value_at(&self, at: Samples, default: f32) -> f32 {
+        if !self.enabled {
+            return default;
+        }
         let pts = &self.points;
         let Some(first) = pts.first() else { return default };
         if at <= first.at {
@@ -158,7 +165,9 @@ impl AutomationLane {
                 if matches!(self.param, AutoParam::Mute | AutoParam::SendMute(_)) {
                     return a.value;
                 }
-                a.value + (b.value - a.value) * ((at - a.at) as f32 / (b.at - a.at) as f32)
+                let elapsed = (i128::from(at) - i128::from(a.at)) as f64;
+                let duration = (i128::from(b.at) - i128::from(a.at)) as f64;
+                (f64::from(a.value) + (f64::from(b.value) - f64::from(a.value)) * (elapsed / duration)) as f32
             }
             (Some(a), _) => a.value,
             _ => default,
@@ -266,6 +275,22 @@ mod tests {
     }
 
     #[test]
+    fn disabled_lanes_return_the_unautomated_value() {
+        let mut lane = AutomationLane::new(AutoParam::Volume);
+        lane.set_point(0, -12.0);
+        lane.enabled = false;
+        assert_eq!(lane.value_at(100, -3.0), -3.0);
+    }
+
+    #[test]
+    fn interpolation_handles_the_full_signed_sample_range() {
+        let mut lane = AutomationLane::new(AutoParam::Pan(0));
+        lane.set_point(i64::MIN, -1.0);
+        lane.set_point(i64::MAX, 1.0);
+        assert!(lane.value_at(0, 1.0).abs() < 1e-6);
+    }
+
+    #[test]
     fn write_range_preserves_outside() {
         let mut l = AutomationLane::new(AutoParam::Volume);
         l.set_point(0, 0.0);
@@ -320,3 +345,4 @@ mod tests {
         assert_eq!(l.points[1].value, 1.0);
     }
 }
+

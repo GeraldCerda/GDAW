@@ -32,7 +32,7 @@ use soundcraft_mix::{MAX_CHANNELS, MixEngine, PreparedInstance, StripMeter, itu_
 use soundcraft_model::{Session, TrackId};
 use soundcraft_time::{Range, Samples};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -81,7 +81,104 @@ struct Shared {
     auditioning: AtomicBool,
     /// Speed × 1000.
     speed: AtomicU32,
-    meters: Mutex<MeterSnapshot>,
+    meters: MeterMailbox,
+}
+
+const METER_TRACKS: usize = 4096;
+
+#[derive(Default)]
+struct AtomicMeter {
+    id: AtomicU64,
+    channels: AtomicUsize,
+    peaks: [AtomicU32; MAX_CHANNELS],
+    stereo: [AtomicU32; 2],
+    reduction: AtomicU32,
+    failures: AtomicU32,
+    last_failure: AtomicUsize,
+}
+
+impl AtomicMeter {
+    fn publish(&self, id: TrackId, meter: Option<&StripMeter>) {
+        self.id.store(id.0, Ordering::Relaxed);
+        self.channels.store(meter.map_or(0, |meter| meter.peaks.len().min(MAX_CHANNELS)), Ordering::Relaxed);
+        for (i, value) in self.peaks.iter().enumerate() {
+            value.store(meter.and_then(|meter| meter.peaks.get(i)).copied().unwrap_or(0.0).to_bits(), Ordering::Relaxed);
+        }
+        for (i, value) in self.stereo.iter().enumerate() {
+            value.store(meter.map_or(0.0, |meter| meter.peak[i]).to_bits(), Ordering::Relaxed);
+        }
+        self.reduction.store(meter.map_or(0.0, |meter| meter.gain_reduction_db).to_bits(), Ordering::Relaxed);
+        self.failures.store(meter.map_or(0, |meter| meter.plugin_failures.count), Ordering::Relaxed);
+        self.last_failure.store(meter.map_or(0, |meter| meter.plugin_failures.last), Ordering::Relaxed);
+    }
+
+    fn read(&self) -> StripMeter {
+        StripMeter {
+            peak: std::array::from_fn(|i| f32::from_bits(self.stereo[i].load(Ordering::Relaxed))),
+            peaks: self.peaks.iter().take(self.channels.load(Ordering::Relaxed).min(MAX_CHANNELS)).map(|value| f32::from_bits(value.load(Ordering::Relaxed))).collect(),
+            gain_reduction_db: f32::from_bits(self.reduction.load(Ordering::Relaxed)),
+            plugin_failures: soundcraft_mix::PluginFailures {
+                count: self.failures.load(Ordering::Relaxed),
+                last: self.last_failure.load(Ordering::Relaxed),
+            },
+        }
+    }
+}
+
+struct MeterMailbox {
+    sequence: AtomicU64,
+    count: AtomicUsize,
+    tracks: Box<[AtomicMeter]>,
+    main: AtomicMeter,
+}
+
+impl Default for MeterMailbox {
+    fn default() -> Self {
+        Self {
+            sequence: AtomicU64::new(0), count: AtomicUsize::new(0),
+            tracks: (0..METER_TRACKS).map(|_| AtomicMeter::default()).collect(), main: AtomicMeter::default(),
+        }
+    }
+}
+
+impl MeterMailbox {
+    fn publish(&self, tracks: &HashMap<TrackId, StripMeter>, main: &StripMeter) {
+        self.sequence.fetch_add(1, Ordering::AcqRel);
+        for (slot, (id, meter)) in self.tracks.iter().zip(tracks) {
+            slot.publish(*id, Some(meter));
+        }
+        self.count.store(tracks.len().min(self.tracks.len()), Ordering::Relaxed);
+        self.main.publish(TrackId(0), Some(main));
+        self.sequence.fetch_add(1, Ordering::Release);
+    }
+
+    fn clear(&self) {
+        self.sequence.fetch_add(1, Ordering::AcqRel);
+        self.count.store(0, Ordering::Relaxed);
+        self.main.publish(TrackId(0), None);
+        self.sequence.fetch_add(1, Ordering::Release);
+    }
+
+    fn try_snapshot(&self) -> Option<MeterSnapshot> {
+        for _ in 0..3 {
+            let before = self.sequence.load(Ordering::Acquire);
+            if before & 1 != 0 {
+                continue;
+            }
+            let count = self.count.load(Ordering::Relaxed).min(self.tracks.len());
+            let tracks = self.tracks.iter().take(count).map(|slot| (TrackId(slot.id.load(Ordering::Relaxed)), slot.read())).collect();
+            let main = self.main.read();
+            std::sync::atomic::fence(Ordering::Acquire);
+            if self.sequence.load(Ordering::Relaxed) == before {
+                return Some(MeterSnapshot { tracks, main });
+            }
+        }
+        None
+    }
+
+    fn snapshot(&self) -> MeterSnapshot {
+        self.try_snapshot().unwrap_or_default()
+    }
 }
 
 /// What stopped the audio output.
@@ -187,13 +284,15 @@ impl AudioState {
     fn new(rx: Receiver<Cmd>, shared: Arc<Shared>, session: Arc<Session>, device_rate: f64, garbage: Sender<Vec<Box<dyn Plugin>>>) -> Self {
         let sr = session.sample_rate.as_f64() as f32;
         let nch = main_channels(&session);
+        let mut mix = new_engine(sr);
+        mix.ensure_synced(&session);
         AudioState {
             garbage,
             old_sessions: None,
             fold: fold_gains(&session),
             rx,
             shared,
-            mix: new_engine(sr),
+            mix,
             session,
             pos: 0,
             playing: false,
@@ -330,19 +429,9 @@ impl AudioState {
         self.mix.render(&self.session, self.pos, n, &mut self.pending);
         self.send_garbage();
         self.pending_len = n;
-        if let Ok(mut m) = self.shared.meters.try_lock() {
-            m.main.copy_from(&self.mix.main_meter);
-            for (k, v) in &self.mix.meters {
-                match m.tracks.get_mut(k) {
-                    Some(d) => d.copy_from(v),
-                    None => {
-                        m.tracks.insert(*k, v.clone());
-                    }
-                }
-            }
-        }
+        self.shared.meters.publish(&self.mix.meters, &self.mix.main_meter);
         if self.playing {
-            self.pos += n as i64;
+            self.pos = self.pos.saturating_add(n as i64);
             self.shared.position.store(self.pos, Ordering::Relaxed);
         }
     }
@@ -353,11 +442,11 @@ impl AudioState {
         let channels = channels.max(1);
         let monitoring = self.input.is_some() && self.session.tracks.iter().any(|t| t.mixer.input_monitor || t.mixer.record_arm);
         if !self.playing && !monitoring && self.audition_frames == 0 {
-            out.iter_mut().for_each(|x| *x = 0.0);
-            if let Ok(mut m) = self.shared.meters.try_lock() {
-                m.main = StripMeter::default();
-                m.tracks.clear();
+            if let Some(input) = &self.input {
+                input.discard();
             }
+            out.iter_mut().for_each(|x| *x = 0.0);
+            self.shared.meters.clear();
             return;
         }
         let speed = f64::from(self.shared.speed.load(Ordering::Relaxed)) / 1000.0;
@@ -537,7 +626,7 @@ impl Player {
             position: AtomicI64::new(0),
             playing: AtomicBool::new(false), auditioning: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
-            meters: Mutex::new(MeterSnapshot::default()),
+            meters: MeterMailbox::default(),
         });
         let want = session.sample_rate.hz();
         let want_ch = u16::try_from(main_channels(&session)).unwrap_or(2);
@@ -810,14 +899,13 @@ impl Player {
     }
 
     pub fn meters(&self) -> MeterSnapshot {
-        self.shared.meters.lock().unwrap_or_else(PoisonError::into_inner).clone()
+        self.shared.meters.snapshot()
     }
 
-    /// Copy meters into reusable UI storage. Once track/channel counts are stable this performs
-    /// no allocation, unlike cloning a new snapshot every video frame.
     pub fn copy_meters(&self, out: &mut MeterSnapshot) {
-        let source = self.shared.meters.lock().unwrap_or_else(PoisonError::into_inner);
-        copy_meter_snapshot(&source, out);
+        if let Some(source) = self.shared.meters.try_snapshot() {
+            copy_meter_snapshot(&source, out);
+        }
     }
 }
 
@@ -1027,7 +1115,7 @@ mod tests {
             position: AtomicI64::new(0),
             playing: AtomicBool::new(true), auditioning: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
-            meters: Mutex::new(MeterSnapshot::default()),
+            meters: MeterMailbox::default(),
         };
         let fault = Fault::default();
         let mut out = [0.5f32; 8];
@@ -1068,7 +1156,7 @@ mod tests {
             position: AtomicI64::new(0),
             playing: AtomicBool::new(false), auditioning: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
-            meters: Mutex::new(MeterSnapshot::default()),
+            meters: MeterMailbox::default(),
         });
         let (tx, rx) = channel();
         let mut st = AudioState::new(rx, Arc::clone(&shared), s, 48_000.0, channel().0);
@@ -1086,7 +1174,7 @@ mod tests {
             position: AtomicI64::new(0),
             playing: AtomicBool::new(false), auditioning: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
-            meters: Mutex::new(MeterSnapshot::default()),
+            meters: MeterMailbox::default(),
         });
         let (tx, rx) = channel();
         let mut st = AudioState::new(rx, Arc::clone(&shared), s, 48_000.0, channel().0);
@@ -1111,7 +1199,7 @@ mod tests {
             position: AtomicI64::new(0),
             playing: AtomicBool::new(false), auditioning: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
-            meters: Mutex::new(MeterSnapshot::default()),
+            meters: MeterMailbox::default(),
         });
         let (tx, rx) = channel();
         let mut st = AudioState::new(rx, Arc::clone(&shared), Arc::clone(&s), 48_000.0, channel().0);
@@ -1130,7 +1218,7 @@ mod tests {
         let h = std::f32::consts::FRAC_1_SQRT_2;
         let l = (0.1 + h * 0.3 + h * 0.5f32).min(1.0);
         assert!((out[200] - l).abs() < 1e-4, "{} vs {l}", out[200]);
-        assert_eq!(shared.meters.lock().unwrap().main.peaks.len(), 6);
+        assert_eq!(shared.meters.snapshot().main.peaks.len(), 6);
     }
 
     #[test]
@@ -1144,7 +1232,7 @@ mod tests {
             position: AtomicI64::new(0),
             playing: AtomicBool::new(false), auditioning: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
-            meters: Mutex::new(MeterSnapshot::default()),
+            meters: MeterMailbox::default(),
         });
         let (tx, rx) = channel();
         let (gtx, grx) = channel();
@@ -1236,7 +1324,7 @@ mod tests {
             position: AtomicI64::new(0),
             playing: AtomicBool::new(false), auditioning: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
-            meters: Mutex::new(MeterSnapshot::default()),
+            meters: MeterMailbox::default(),
         });
         let (tx, rx) = channel();
         let (gtx, grx) = channel();
@@ -1265,7 +1353,7 @@ mod tests {
             position: AtomicI64::new(0),
             playing: AtomicBool::new(false), auditioning: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
-            meters: Mutex::new(MeterSnapshot::default()),
+            meters: MeterMailbox::default(),
         });
         let (tx, rx) = channel();
         let mut st = AudioState::new(rx, Arc::clone(&shared), s, 48_000.0, channel().0);
@@ -1300,7 +1388,7 @@ mod tests {
                 position: AtomicI64::new(0),
                 playing: AtomicBool::new(false), auditioning: AtomicBool::new(false),
                 speed: AtomicU32::new(1000),
-                meters: Mutex::new(MeterSnapshot::default()),
+                meters: MeterMailbox::default(),
             });
             let (tx, rx) = channel();
             let mut st = AudioState::new(rx, Arc::clone(&shared), Arc::new(s), 48_000.0, channel().0);
@@ -1331,7 +1419,7 @@ mod tests {
             position: AtomicI64::new(0),
             playing: AtomicBool::new(false), auditioning: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
-            meters: Mutex::new(MeterSnapshot::default()),
+            meters: MeterMailbox::default(),
         });
         let (tx, rx) = channel();
         let mut st = AudioState::new(rx, Arc::clone(&shared), Arc::new(s), 48_000.0, channel().0);
@@ -1344,7 +1432,7 @@ mod tests {
         ring.push(&[0.5; 4096]);
         st.fill(&mut out, 2);
         assert!(out.iter().any(|x| x.abs() > 0.1), "the input is heard");
-        assert!(shared.meters.lock().unwrap().tracks.get(&t).is_some_and(|m| m.peak[0] > 0.1), "and metered");
+        assert!(shared.meters.snapshot().tracks.get(&t).is_some_and(|m| m.peak[0] > 0.1), "and metered");
     }
 }
 
@@ -1359,7 +1447,7 @@ mod audition_transport_tests {
         session.track_mut(track).unwrap().instrument = Some(soundcraft_model::Insert::new("drum_rack"));
         let shared = Arc::new(Shared {
             position: AtomicI64::new(0), playing: AtomicBool::new(false), auditioning: AtomicBool::new(false), speed: AtomicU32::new(1000),
-            meters: Mutex::new(MeterSnapshot::default()),
+            meters: MeterMailbox::default(),
         });
         let (sender, receiver) = channel();
         let mut state = AudioState::new(receiver, shared, Arc::new(session), 48_000.0, channel().0);
@@ -1404,7 +1492,7 @@ mod long_preview_lifetime_tests {
         session.track_mut(track).unwrap().instrument=Some(rack);
         let shared=Arc::new(Shared {
             position:AtomicI64::new(0), playing:AtomicBool::new(false), auditioning:AtomicBool::new(false),
-            speed:AtomicU32::new(1000), meters:Mutex::new(MeterSnapshot::default()),
+            speed:AtomicU32::new(1000), meters:MeterMailbox::default(),
         });
         let (sender,receiver)=channel();
         let mut state=AudioState::new(receiver,shared.clone(),Arc::new(session),44_100.0,channel().0);
@@ -1421,3 +1509,4 @@ mod long_preview_lifetime_tests {
         assert!(!shared.auditioning.load(Ordering::Relaxed));
     }
 }
+

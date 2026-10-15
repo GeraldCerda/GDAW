@@ -86,6 +86,9 @@ fn finite(x: f32) -> f32 {
 
 struct Shared {
     armed: AtomicBool,
+    capturing: AtomicBool,
+    epoch: AtomicUsize,
+    pending_silence: AtomicUsize,
     ring: CaptureRing,
     /// Samples lost while the ring was full.
     dropped: AtomicUsize,
@@ -100,7 +103,10 @@ struct Shared {
 impl Shared {
     fn new(ring: CaptureRing) -> Shared {
         let (beats, fault, failed) = (AtomicU64::new(0), AtomicU8::new(0), Mutex::new(None));
-        Shared { armed: AtomicBool::new(false), ring, dropped: AtomicUsize::new(0), beats, fault, failed }
+        Shared {
+            armed: AtomicBool::new(false), capturing: AtomicBool::new(false), epoch: AtomicUsize::new(0),
+            pending_silence: AtomicUsize::new(0), ring, dropped: AtomicUsize::new(0), beats, fault, failed,
+        }
     }
 
     /// Run the input callback's `work`. After a panic in it, the input is broken and does
@@ -118,7 +124,16 @@ impl Shared {
         *owed -= self.ring.push(*owed, |_| 0.0);
         let kept = if *owed == 0 { self.ring.push(data.len(), |i| data.get(i).copied().map_or(0.0, finite)) } else { 0 };
         *owed = owed.saturating_add(data.len() - kept);
+        self.pending_silence.store(*owed, Ordering::Release);
         self.dropped.fetch_add(data.len() - kept, Ordering::Relaxed);
+    }
+}
+
+struct CaptureFlight<'a>(&'a AtomicBool);
+
+impl Drop for CaptureFlight<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
     }
 }
 
@@ -162,6 +177,7 @@ where
     let mut scratch = vec![0.0f32; 8192 * usize::from(config.channels).max(1)];
     let chunk = scratch.len();
     let mut owed = 0;
+    let mut epoch = 0;
     device.build_input_stream(
         config,
         move |data: &[T], _: &cpal::InputCallbackInfo| {
@@ -180,7 +196,14 @@ where
                         level.fetch_max(peak.min(1.0).to_bits(), Ordering::Relaxed);
                     }
                     mon.push(s);
-                    if sh.armed.load(Ordering::Acquire) {
+                    sh.capturing.store(true, Ordering::SeqCst);
+                    let _flight = CaptureFlight(&sh.capturing);
+                    if sh.armed.load(Ordering::SeqCst) {
+                        let current = sh.epoch.load(Ordering::Acquire);
+                        if epoch != current {
+                            owed = 0;
+                            epoch = current;
+                        }
                         sh.capture(s, &mut owed);
                     } else {
                         owed = 0;
@@ -287,12 +310,14 @@ impl Recorder {
         let ring = &self.shared.ring;
         ring.tail.store(ring.head.load(Ordering::Acquire), Ordering::Release);
         *self.shared.failed.lock().unwrap_or_else(PoisonError::into_inner) = None;
-        self.shared.armed.store(true, Ordering::Release);
+        self.shared.pending_silence.store(0, Ordering::Release);
+        self.shared.epoch.fetch_add(1, Ordering::Release);
+        self.shared.armed.store(true, Ordering::SeqCst);
         let (shared, channels) = (Arc::clone(&self.shared), self.channels);
         match std::thread::Builder::new().name("take writer".into()).spawn(move || write_takes(&shared, takes, channels)) {
             Ok(w) => self.writer = Some((w, live)),
             Err(e) => {
-                self.shared.armed.store(false, Ordering::Release);
+                self.shared.armed.store(false, Ordering::SeqCst);
                 return Err(e.to_string());
             }
         }
@@ -331,7 +356,7 @@ impl Recorder {
     }
 
     pub fn finish(&mut self) -> Takes {
-        self.shared.armed.store(false, Ordering::Release);
+        self.shared.armed.store(false, Ordering::SeqCst);
         let (takes, problem) = self.writer.take().and_then(|(w, _)| w.join().ok()).unwrap_or_default();
         let lost = self.shared.dropped.swap(0, Ordering::Relaxed) / self.channels.max(1);
         let slow =
@@ -349,7 +374,11 @@ impl Drop for Recorder {
 fn write_takes(shared: &Shared, mut takes: Vec<TakeWriter>, channels: usize) -> Takes {
     let (mut block, mut header_written, mut reported) = (Vec::new(), Instant::now(), false);
     loop {
-        let stopping = !shared.armed.load(Ordering::Acquire);
+        let stopping = !shared.armed.load(Ordering::SeqCst);
+        if stopping && shared.capturing.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(1));
+            continue;
+        }
         // The ring holds interleaved samples and a pop can end mid-frame: write whole frames and
         // keep the remainder for the next pop, so channels never shift.
         shared.ring.pop_all(&mut block);
@@ -361,6 +390,15 @@ fn write_takes(shared: &Shared, mut takes: Vec<TakeWriter>, channels: usize) -> 
             reported = true;
         }
         if stopping {
+            let mut silence = shared.pending_silence.swap(0, Ordering::Acquire);
+            while silence > 0 {
+                let count = silence.min(65_536);
+                block.resize(block.len().saturating_add(count), 0.0);
+                silence -= count;
+                let whole = block.len() - block.len() % channels.max(1);
+                takes.iter_mut().for_each(|take| take.write(&block[..whole], channels));
+                block.drain(..whole);
+            }
             break;
         }
         if header_written.elapsed() >= Duration::from_secs(1) {
@@ -461,6 +499,22 @@ mod tests {
 
     fn decode(path: &PathBuf) -> Vec<Vec<f32>> {
         soundcraft_audio_io::decode(&std::fs::read(path).unwrap(), None).unwrap().1.channels
+    }
+
+    #[test]
+    fn stopping_after_an_overrun_keeps_the_final_gap_and_channel_alignment() {
+        let directory = std::env::temp_dir().join(format!("gdaw-record-tail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        let path = directory.join("take.wav");
+        let take = TakeWriter::create(TrackId(1), vec![0, 1, 2], path.clone(), 48_000).unwrap();
+        let shared = Shared::new(CaptureRing::new(8));
+        let mut owed = 0;
+        shared.capture(&[0.25; 12], &mut owed);
+        assert_eq!(owed, 4);
+        let (done, problem) = write_takes(&shared, vec![take], 3);
+        assert_eq!((done.len(), problem), (1, None));
+        assert_eq!(decode(&path), [vec![0.25, 0.25, 0.25, 0.0], vec![0.25, 0.25, 0.25, 0.0], vec![0.25, 0.25, 0.0, 0.0]]);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -613,82 +667,144 @@ mod tests {
     }
 }
 
-/// Ring state behind the lock: interleaved input frames at the input device's rate, plus the
-/// fractional read position (in input frames) of the next output sample.
-struct RingState {
-    data: std::collections::VecDeque<f32>,
-    phase: f64,
-}
-
-/// A small interleaved FIFO from the input callback to the output callback, for input
-/// monitoring. Both sides only `try_lock`; it holds at most ~0.5 s and drops the oldest frames.
-/// The input device may run at a different rate than the session, so the reader converts
-/// rates with linear interpolation (cheap, allocation-free, fine for monitoring).
 pub struct InputRing {
-    state: Mutex<RingState>,
+    slots: Box<[AtomicU32]>,
+    width: usize,
+    mask: usize,
+    head: AtomicUsize,
+    tail: AtomicUsize,
+    phase: AtomicU64,
+    dropped: AtomicU64,
     pub channels: std::sync::atomic::AtomicUsize,
     /// Input device sample rate in Hz (0 when unknown, which reads as "same as the session").
     rate: u32,
-    /// Most samples kept: half a second of input, or 24 000 frames when the rate is unknown.
-    cap: usize,
 }
 
 impl InputRing {
     pub fn new(channels: usize, rate: u32) -> Arc<InputRing> {
-        let ch = channels.max(1);
+        let ch = channels.clamp(1, 256);
         let frames = if rate == 0 { 24_000 } else { rate as usize / 2 };
+        let frames = frames.clamp(2, (1 << 22) / ch).next_power_of_two();
         Arc::new(InputRing {
-            state: Mutex::new(RingState { data: std::collections::VecDeque::with_capacity(rate.max(48_000) as usize * ch), phase: 0.0 }),
+            slots: (0..frames * ch).map(|_| AtomicU32::new(0)).collect(),
+            width: ch,
+            mask: frames - 1,
+            head: AtomicUsize::new(0),
+            tail: AtomicUsize::new(0),
+            phase: AtomicU64::new(0.0f64.to_bits()),
+            dropped: AtomicU64::new(0),
             channels: std::sync::atomic::AtomicUsize::new(ch),
             rate,
-            cap: frames * ch,
         })
     }
 
     pub fn push(&self, samples: &[f32]) {
-        if let Ok(mut s) = self.state.try_lock() {
-            s.data.extend(samples.iter().copied().map(finite));
-            while s.data.len() > self.cap {
-                s.data.pop_front();
+        let head = self.head.load(Ordering::Relaxed);
+        let used = head.wrapping_sub(self.tail.load(Ordering::Acquire));
+        let offered = samples.len() / self.width;
+        let kept = offered.min((self.mask + 1).saturating_sub(used));
+        for (frame, values) in samples.chunks_exact(self.width).take(kept).enumerate() {
+            let base = (head.wrapping_add(frame) & self.mask) * self.width;
+            for (channel, value) in values.iter().enumerate() {
+                if let Some(slot) = self.slots.get(base + channel) {
+                    slot.store(finite(*value).to_bits(), Ordering::Relaxed);
+                }
             }
         }
+        self.head.store(head.wrapping_add(kept), Ordering::Release);
+        self.dropped.fetch_add((offered - kept) as u64, Ordering::Relaxed);
+    }
+
+    pub fn discard(&self) {
+        self.tail.store(self.head.load(Ordering::Acquire), Ordering::Release);
+        self.phase.store(0.0f64.to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn dropped_frames(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
     }
 
     /// Fill `out` (planar, at `session_rate`) with up to `frames` frames, converting from the
     /// input rate. Missing frames are silence.
     pub fn pop_into(&self, out: &mut [Vec<f32>], frames: usize, session_rate: u32) {
-        let ch = self.channels.load(Ordering::Relaxed).max(1);
+        let ch = self.width;
         for c in out.iter_mut() {
             c.iter_mut().take(frames).for_each(|x| *x = 0.0);
         }
-        let Ok(mut s) = self.state.try_lock() else { return };
-        // Input frames consumed per output frame.
+        let mut tail = self.tail.load(Ordering::Relaxed);
+        let head = self.head.load(Ordering::Acquire);
+        let mut available = head.wrapping_sub(tail).min(self.mask + 1);
+        let mut phase = f64::from_bits(self.phase.load(Ordering::Relaxed));
         let step = if self.rate == 0 || session_rate == 0 { 1.0 } else { f64::from(self.rate) / f64::from(session_rate) };
         for f in 0..frames {
-            // Drop input frames we have moved past; keep the one at `phase` and the next one.
-            while s.phase >= 1.0 && s.data.len() >= 2 * ch {
-                s.data.drain(..ch);
-                s.phase -= 1.0;
-            }
-            if s.phase >= 1.0 || s.data.len() < 2 * ch {
+            let consumed = (phase.floor() as usize).min(available);
+            tail = tail.wrapping_add(consumed);
+            available -= consumed;
+            phase -= consumed as f64;
+            if phase >= 1.0 || available == 0 || (phase > 0.0 && available < 2) {
                 break;
             }
-            let fr = s.phase as f32;
+            let fr = phase as f32;
             for c in 0..ch {
-                let a = s.data.get(c).copied().unwrap_or(0.0);
-                let b = s.data.get(ch + c).copied().unwrap_or(a);
+                let sample = |at: usize| {
+                    self.slots.get((at & self.mask) * ch + c).map_or(0.0, |slot| f32::from_bits(slot.load(Ordering::Relaxed)))
+                };
+                let a = sample(tail);
+                let b = if available > 1 { sample(tail.wrapping_add(1)) } else { a };
                 if let Some(x) = out.get_mut(c).and_then(|o| o.get_mut(f)) {
                     *x = a + (b - a) * fr;
                 }
             }
-            s.phase += step;
+            phase += step;
         }
+        let consumed = (phase.floor() as usize).min(available);
+        tail = tail.wrapping_add(consumed);
+        phase -= consumed as f64;
+        self.phase.store(phase.to_bits(), Ordering::Relaxed);
+        self.tail.store(tail, Ordering::Release);
     }
 }
 
 #[cfg(test)]
 mod ring_tests {
     use super::InputRing;
+
+    #[test]
+    fn monitoring_reads_a_final_single_frame_without_lookahead() {
+        let ring = InputRing::new(2, 48_000);
+        ring.push(&[0.25, -0.5]);
+        let mut output = vec![vec![1.0; 2]; 2];
+        ring.pop_into(&mut output, 2, 48_000);
+        assert_eq!(output, [vec![0.25, 0.0], vec![-0.5, 0.0]]);
+    }
+
+    #[test]
+    fn monitoring_overflow_keeps_whole_frames_and_recovers_after_discard() {
+        let ring = InputRing::new(3, 8);
+        let input: Vec<f32> = (0..18).map(|value| value as f32).collect();
+        ring.push(&input);
+        assert_eq!(ring.dropped_frames(), 2);
+        let mut output = vec![vec![0.0; 4]; 3];
+        ring.pop_into(&mut output, 4, 8);
+        assert_eq!(output, [vec![0.0, 3.0, 6.0, 9.0], vec![1.0, 4.0, 7.0, 10.0], vec![2.0, 5.0, 8.0, 11.0]]);
+        ring.push(&[20.0, 21.0, 22.0]);
+        ring.discard();
+        ring.push(&[30.0, 31.0, 32.0]);
+        ring.pop_into(&mut output, 1, 8);
+        assert_eq!([output[0][0], output[1][0], output[2][0]], [30.0, 31.0, 32.0]);
+    }
+
+    #[test]
+    fn monitoring_counters_wrap_without_shifting_channels() {
+        use std::sync::atomic::Ordering;
+        let ring = InputRing::new(2, 8);
+        ring.head.store(usize::MAX - 1, Ordering::Relaxed);
+        ring.tail.store(usize::MAX - 1, Ordering::Relaxed);
+        ring.push(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let mut output = vec![vec![0.0; 3]; 2];
+        ring.pop_into(&mut output, 3, 8);
+        assert_eq!(output, [vec![1.0, 3.0, 5.0], vec![2.0, 4.0, 6.0]]);
+    }
 
     /// A 1 kHz sine recorded at 16 kHz must come out as a 1 kHz sine at 48 kHz, across calls.
     #[test]
@@ -764,3 +880,4 @@ mod input_config_tests {
         assert!(input_config_rank(12, cpal::SampleFormat::F32) < input_config_rank(12, cpal::SampleFormat::I32));
     }
 }
+
