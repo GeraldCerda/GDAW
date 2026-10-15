@@ -14,7 +14,7 @@ if [ "$(uname -s)" != "Darwin" ]; then
     exit 2
 fi
 
-commit="55dda6b6541efe16e85ffc8839c96fe650df746e"
+commit="d60c08d7b79187518302218b49e13dbec883607c"
 mkdir -p "$kit_dir/logs"
 build_log="$kit_dir/logs/build-$(date +%Y%m%d-%H%M%S).log"
 exec > >(tee -a "$build_log") 2>&1

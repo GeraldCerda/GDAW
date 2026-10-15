@@ -1,6 +1,6 @@
 GDAW Mac Test Kit v4
 
-Source revision: 55dda6b6541efe16e85ffc8839c96fe650df746e
+Source revision: d60c08d7b79187518302218b49e13dbec883607c
 Repository: https://github.com/GeraldCerda/GDAW
 
 This kit downloads pinned source from GeraldCerda/GDAW and builds it on your Mac. No DAW binary, installer or source ZIP was built while preparing these changes. Existing v3 folders and Cargo caches remain usable with the updated build_test.sh.
