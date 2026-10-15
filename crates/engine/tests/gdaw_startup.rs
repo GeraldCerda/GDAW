@@ -1,7 +1,7 @@
 use serde_json::json;
 use soundcraft_engine::{Engine, starter_session};
 use soundcraft_model::{ChannelFormat, Route, TrackKind};
-use soundcraft_time::SampleRate;
+use soundcraft_time::{GridValue, NoteValue, SampleRate};
 
 #[test]
 fn startup_has_a_stereo_drum_rack_and_a_mono_recording_track() {
@@ -36,7 +36,7 @@ fn the_gdaw_template_and_explicit_blank_template_stay_distinct() {
 #[test]
 fn startup_grid_exposes_eighth_notes_without_changing_zoom() {
     let session = starter_session("Grid", SampleRate::HZ_48000);
-    assert_eq!(session.edit.grid.label(), "1/8");
+    assert_eq!(session.edit.grid, GridValue::Note { value: NoteValue::Eighth, dotted: false, triplet: false });
     assert!(session.edit.grid_lines);
     assert_eq!(session.edit.edit_mode, soundcraft_model::EditMode::Grid);
     let pixels = session.edit.grid.step_samples(0, session.sample_rate, &session.tempo, session.frame_rate) as f64 / session.edit.zoom.samples_per_px;
