@@ -49,6 +49,8 @@ impl Rig {
         for _ in 0..60 {
             self.frame(vec![]);
         }
+        let viewport = edit_window::rect(self.app.edit_layout.timeline);
+        assert!(viewport.contains(at), "click {at:?} is outside the visible timeline {viewport:?}");
         for pressed in [true, false, true, false] {
             self.frame(vec![
                 Event::PointerMoved(at),
@@ -56,6 +58,29 @@ impl Rig {
             ]);
         }
         self.frame(vec![]);
+    }
+
+    fn reveal_clip(&mut self, track: &str) -> (ClipId, Rect) {
+        for _ in 0..4 {
+            self.frame(vec![]);
+        }
+        let (_, bounds) = self.clip(track);
+        let viewport = edit_window::rect(self.app.edit_layout.timeline);
+        let delta = if bounds.bottom() > viewport.bottom() {
+            bounds.bottom() - viewport.bottom() + 1.0
+        } else if bounds.top() < viewport.top() {
+            bounds.top() - viewport.top() - 1.0
+        } else {
+            0.0
+        };
+        self.app.edit_layout.scroll_by(delta, viewport.height());
+        for _ in 0..4 {
+            self.frame(vec![]);
+        }
+        let result = self.clip(track);
+        let viewport = edit_window::rect(self.app.edit_layout.timeline);
+        assert!(result.1.top() >= viewport.top() && result.1.bottom() <= viewport.bottom(), "clip {:?} must be visible in {viewport:?}", result.1);
+        result
     }
 
     fn editing(&self) -> Option<ClipId> {
@@ -75,13 +100,13 @@ fn double_clicking_a_midi_clip_with_the_grabber_opens_the_midi_editor() {
 #[test]
 fn the_smart_tool_opens_it_from_the_lower_half_and_selects_from_the_upper_half() {
     let mut r = Rig::new("smart");
-    let (keys, at) = r.clip("Keys");
+    let (keys, at) = r.reveal_clip("Keys");
     r.double_click(pos2(at.center().x, at.top() + at.height() * 0.25));
     assert!(!r.app.ui.show_midi_editor);
     assert_eq!(r.app.engine.session().edit.selected_clips, vec![keys]);
-    let (_, at) = r.clip("Keys");
+    let (_, at) = r.reveal_clip("Keys");
     r.double_click(pos2(at.center().x, at.top() + at.height() * 0.75));
-    assert_eq!(r.editing(), Some(keys));
+    assert_eq!(r.editing(), Some(keys), "clip {at:?}, timeline {:?}", r.app.edit_layout.timeline);
 }
 
 #[test]
