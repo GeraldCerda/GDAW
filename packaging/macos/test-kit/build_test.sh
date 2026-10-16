@@ -3,8 +3,10 @@ set -euo pipefail
 
 kit_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 verify=0
+commit=""
 for argument in "$@"; do
     case "$argument" in
+        --revision=*) commit="${argument#--revision=}" ;;
         --verify) verify=1 ;;
         --verify-ui) verify=2 ;;
         *) printf 'Unknown option: %s\n' "$argument" >&2; exit 2 ;;
@@ -16,7 +18,13 @@ if [ "$(uname -s)" != "Darwin" ]; then
     exit 2
 fi
 
-commit="964ecaa999ad8feb17bce77c3830005ba1e4b656"
+if [ -z "$commit" ] && [ -f "$kit_dir/SOURCE_COMMIT" ]; then
+    IFS= read -r commit < "$kit_dir/SOURCE_COMMIT"
+fi
+if [ "${#commit}" -ne 40 ] || [[ "$commit" == *[!0-9a-f]* ]]; then
+    printf 'Use the matching package SOURCE_COMMIT or pass --revision=<full Git commit>.\n' >&2
+    exit 2
+fi
 mkdir -p "$kit_dir/logs"
 build_log="$kit_dir/logs/build-$(date +%Y%m%d-%H%M%S).log"
 exec > >(tee -a "$build_log") 2>&1
@@ -131,7 +139,7 @@ install_move() {
     fi
 }
 if [ -e "$destination" ] || [ -L "$destination" ]; then
-    backup="/Applications/GDAW Test Backup $(date +%Y%m%d-%H%M%S)-$.app"
+    backup="/Applications/GDAW Test Backup $(date +%Y%m%d-%H%M%S)-$$.app"
     if [ -e "$backup" ] || [ -L "$backup" ]; then
         printf 'Backup destination already exists: %s\n' "$backup" >&2
         exit 1

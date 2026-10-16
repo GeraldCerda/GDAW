@@ -1,37 +1,31 @@
-GDAW Mac Test Kit v6.1
+GDAW Mac Test Kit v7
 
-Source revision: 964ecaa999ad8feb17bce77c3830005ba1e4b656
 Repository: https://github.com/GeraldCerda/GDAW
+Package revision: read SOURCE_COMMIT beside this file. The source ZIP, kit scripts and app build all use that exact Git commit.
 
-Verified on Apple Silicon macOS with Rust 1.99.1:
-- Native arm64 desktop executable: normal locked release build, deployment target 11.0, zero compiler errors or warnings.
-- Complete DSP, model, engine, mix, playback and UI regression suites: 819 passed, 0 failed, 0 ignored, across 87 result targets.
-- Regression executables use release optimization with test-only link-time optimization disabled. The application keeps its normal release link settings.
-- Packaging lint passed.
+This kit has no embedded older source pin. Each delivery includes a new source ZIP and matching kit ZIP. SOURCE_COMMIT is package metadata created after the Git commit; it does not modify repository source files. An explicit --revision=<full Git commit> selects the same revision when using GitHub downloads directly.
 
-Build result:
-https://github.com/GeraldCerda/GDAW/actions/runs/38855525806
-Regression result:
-https://github.com/GeraldCerda/GDAW/actions/runs/38855525758
-Full failure audit and remaining untested areas:
-https://github.com/GeraldCerda/GDAW/blob/main/docs/GDAW_BUILD_FAILURE_AUDIT_2026-10-16.md
+Extract the kit into ~/Downloads/GDAW_Test_Kit, replacing the kit files and SOURCE_COMMIT. Existing logs, settings and Cargo caches remain available.
 
-Replace the three kit files in ~/Downloads/GDAW_Test_Kit. Existing source folders, logs, settings and Cargo caches can remain.
-
-Build, install and launch the verified source:
+Build, install and launch:
 bash "$HOME/Downloads/GDAW_Test_Kit/build_test.sh"
 
-The automated regression suites have already passed in CI. To repeat all six suites locally before installation:
+The normal command runs no regression suites. It downloads the exact revision's source, builds the native Mac application, signs it locally, installs GDAW Test.app into /Applications, reveals it in Finder and launches it. macOS may request your administrator password for installation. Any previous tester in /Applications is preserved as a timestamped backup. The launch script prefers /Applications and retains a fallback to ~/Applications.
+
+The installed app records its exact source commit in Contents/Info.plist as GDAWBuildCommit. Test settings remain in ~/Library/Application Support/GDAW Test. Build and launch logs remain in this kit's logs directory.
+
+Optional verification is explicit:
 bash "$HOME/Downloads/GDAW_Test_Kit/build_test.sh" --verify
 
-Both verification options disable link-time optimization for test executables only, matching CI and avoiding repeated whole-program optimization for dozens of tests. The application build retains its normal release configuration. A failed compilation or test still stops installation. Formatting differences are recorded separately. --verify-ui runs only UI tests and is insufficient for a complete core regression pass.
+--verify runs the DSP, model, engine, mix, playback and UI suites. --verify-ui runs only UI tests. Both options disable link-time optimization for test executables only. The application keeps its normal release link settings. No test suite runs without a verification option.
 
-The script checks Apple Command Line Tools, installs or updates Rust when needed, downloads the exact pinned source, builds the native application and signs it locally. It installs GDAW Test.app in /Applications, reveals it in Finder, and keeps a previous tester as a timestamped backup. macOS may request your administrator password to move the app into /Applications. The launcher prefers /Applications and falls back to the older ~/Applications location. Test settings remain in ~/Library/Application Support/GDAW Test. Logs remain in this kit's logs directory.
+The last native arm64 desktop build and complete core/UI verification were performed at source revision 964ecaa999ad8feb17bce77c3830005ba1e4b656 with Rust 1.99.1: zero compiler errors or warnings; 819 tests passed, zero failed, zero ignored.
+Build: https://github.com/GeraldCerda/GDAW/actions/runs/38855525806
+Regressions: https://github.com/GeraldCerda/GDAW/actions/runs/38855525758
 
-If v6 already installed the app in ~/Applications, open that folder in Finder and move GDAW Test.app into /Applications. Authenticate if macOS asks. This moves the existing build; no rebuild is needed. Preserve any existing app when Finder asks about a name conflict.
+Subsequent kit changes correct the /Applications destination and bind each package to its own Git revision. These kit changes have not been compiled, installed or launched on a Mac. The older successful CI runs do not establish an installation result for this package.
 
-The CI build did not launch the application, create or install an app bundle, or exercise physical audio hardware. Installation, signing, interactive use on your Mac, Apollo input/output and recording, device-clock drift, hosted plugins and real-time deadlines still need validation. This is not a production-readiness certification.
+Architecture work remains incomplete: complete parameter Touch/Latch gestures and native hosted automation events; timestamp-driven capture alignment; remaining callback/plugin lifecycle and streaming work; delay-capacity replenishment; AudioSuite recovery, partial-selection/crossfaded replacement and media ownership; instrument DSP ordering and overflow presentation.
 
-Architecture work remains incomplete: complete parameter Touch/Latch gestures and native hosted automation events; timestamp-driven capture alignment; remaining callback/plugin lifecycle and streaming work; delay-capacity replenishment; AudioSuite recovery, partial-selection/crossfaded replacement and media ownership; instrument DSP ordering and overflow presentation. See the linked audit for the exact verification limits.
-
-Use a disposable session copy for playback/stop/seek, recording, short bounce, automation, aux routing, insert/instrument changes and AudioSuite undo/save/reopen. Keep the build or launch log if anything fails.
+Physical audio, Apollo input/output and recording, device-clock drift, hosted plugins, callback timing, audible delay changes, AudioSuite crash recovery and interactive application use remain unvalidated. Use a disposable session copy.
+Full audit: https://github.com/GeraldCerda/GDAW/blob/main/docs/GDAW_BUILD_FAILURE_AUDIT_2026-10-16.md
