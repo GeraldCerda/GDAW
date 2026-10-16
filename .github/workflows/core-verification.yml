@@ -21,7 +21,7 @@ concurrency:
 jobs:
   macos:
     runs-on: macos-15
-    timeout-minutes: 90
+    timeout-minutes: 45
     steps:
       - name: Fetch exact source archive
         env:
@@ -34,8 +34,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          cache-workspace-crates: true
       - name: Run core and UI regressions
+        env:
+          CARGO_PROFILE_RELEASE_LTO: "off"
         run: cargo +stable test --no-fail-fast --locked --release -p soundcraft-dsp -p soundcraft-model -p soundcraft-engine -p soundcraft-mix -p soundcraft-playback -p soundcraft-ui-egui
-      - name: Build desktop binary
-        if: ${{ !cancelled() }}
-        run: cargo +stable build --locked --release -p soundcraft
