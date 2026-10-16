@@ -458,6 +458,19 @@ impl SoundApp {
                 if replacing || (id.starts_with("session.save") && !self.engine.is_dirty()) {
                     self.release_autosave(false);
                 }
+                if id == "mix.routing_diagnostics" {
+                    let issues = v.get("issues").and_then(Value::as_array);
+                    self.ui.status = match issues {
+                        Some(issues) if issues.is_empty() => "Routing: no cycles or missing buses".into(),
+                        Some(issues) => issues.iter().filter_map(|issue| {
+                            let id = issue.get("track")?.as_u64()?;
+                            let problem = issue.get("problem")?.as_str()?;
+                            let name = self.engine.session().track(TrackId(id)).map_or_else(|| id.to_string(), |track| track.name.clone());
+                            Some(format!("{name}: {problem}"))
+                        }).collect::<Vec<_>>().join("; "),
+                        None => "Routing diagnostics returned no result".into(),
+                    };
+                }
                 if id == "app.quit" {
                     self.quit_requested = true;
                 }
@@ -1806,4 +1819,3 @@ mod tests {
         assert!((speed(&app) - 1.0).abs() < 1e-3, "a half-speed pass that ends on its own restores full speed");
     }
 }
-

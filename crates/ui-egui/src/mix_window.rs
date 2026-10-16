@@ -479,11 +479,8 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
     ui.painter().line_segment([pos2(r.max.x, r.min.y), pos2(r.max.x, r.max.y)], Stroke::new(1.0, t.border));
 }
 
-/// What a plugin slot shows at its left: a dot for inserts, the send's letter, or an arrow for
-/// a send on a short track.
 #[derive(Clone, Copy)]
 enum Mark {
-    Dot,
     Letter(char),
     Arrow,
 }
@@ -495,9 +492,6 @@ const NAME_SIZE: f32 = 9.5;
 fn draw_mark(p: &egui::Painter, r: Rect, mark: Mark, color: Color32) {
     let at = pos2(r.min.x + 4.75, r.center().y);
     match mark {
-        Mark::Dot => {
-            p.circle_filled(at, 2.0, color);
-        }
         Mark::Letter(l) => {
             p.text(pos2(r.min.x + 2.5, r.center().y), Align2::LEFT_CENTER, l, bold(NAME_SIZE), color);
         }
@@ -521,10 +515,9 @@ fn empty_slot(p: &egui::Painter, r: Rect, hovered: bool, mark: Mark) {
 /// centred, and for sends a level box at the right. It doesn't brighten on hover, which would
 /// cost its name contrast.
 fn used_slot(p: &egui::Painter, r: Rect, faces: [Color32; 2], mark: Mark, name: &str, color: Color32, level: Option<f32>) {
-    let t = Tokens::current();
     let outer = r.expand(1.0);
     let top = raised_key(p, outer, faces, false);
-    draw_mark(p, r, mark, if matches!(mark, Mark::Dot) { t.slot_mark.lerp_to_gamma(color, 0.35) } else { color });
+    draw_mark(p, r, mark, color);
     if r.width() < COMPACT_SLOT {
         return;
     }
@@ -1291,12 +1284,11 @@ mod strip_height_tests {
     #[test]
     fn every_enabled_section_reserves_space_above_the_fader() {
         let minimal = minimum_strip_height(&[]);
-        let defaults = minimum_strip_height(&["instruments".into(), "inserts_ae".into(), "sends_ae".into(), "io".into()]);
+        let defaults = minimum_strip_height(&["inserts_ae".into(), "sends_ae".into(), "io".into()]);
         let all = minimum_strip_height(&["all".into()]);
         assert_eq!(minimal, 374.0);
-        assert_eq!(defaults, 708.0);
-        assert_eq!(all, 1072.0);
+        assert_eq!(defaults, 670.0);
+        assert_eq!(all, 1034.0);
         assert!(all > defaults);
     }
 }
-

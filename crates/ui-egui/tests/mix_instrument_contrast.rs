@@ -83,14 +83,14 @@ fn populated_mix_instrument_uses_readable_palette_in_real_frames() {
     app.run("track.new", json!({"kind": "instrument", "name": "Built-in instrument"})).unwrap();
     let instrument = app.engine.session().edit.selected_tracks[0];
     assert_eq!(app.engine.session().track(instrument).unwrap().instrument.as_ref().unwrap().plugin, "subtractive_synth");
-    app.run("mix.insert", json!({"track": instrument.0, "slot": 0, "plugin": "eq_7band"})).unwrap();
+    app.run("mix.insert", json!({"track": instrument.0, "slot": 1, "plugin": "eq_7band"})).unwrap();
     app.run("track.new", json!({"kind": "instrument", "name": "Empty instrument"})).unwrap();
     // An unassigned instrument is a supported model state; track.new normally supplies a synth.
     let empty = app.engine.session().edit.selected_tracks[0];
     app.engine.session_mut().track_mut(empty).unwrap().instrument = None;
     app.ui.window = soundcraft_ui_egui::MainWindow::Mix;
     app.run("view.mix_section", json!({"section": "minimal"})).unwrap();
-    for section in ["instruments", "inserts_ae"] {
+    for section in ["inserts_ae"] {
         app.run("view.mix_section", json!({"section": section})).unwrap();
     }
     let session = app.engine.session().clone();

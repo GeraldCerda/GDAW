@@ -53,7 +53,7 @@ fn the_tracks_gutter_pages_a_long_list() {
         .shapes
         .iter()
         .find_map(|shape| match &shape.shape {
-            Shape::Rect(rect) if rect.fill == Tokens::DARK.button_hi && rect.rect.width() == 6.0 => Some(rect.rect),
+            Shape::Rect(rect) if rect.fill == Tokens::LIGHT.button_hi && rect.rect.width() == 6.0 => Some(rect.rect),
             _ => None,
         })
         .expect("a list longer than its space shows a thumb");

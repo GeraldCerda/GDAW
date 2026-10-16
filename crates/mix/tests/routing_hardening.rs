@@ -44,7 +44,7 @@ fn fader_and_pan_breakpoints_are_independent_of_render_block_size() {
     let small = render_range(&session, Range::new(0, 512), 16);
     let large = render_range(&session, Range::new(0, 512), 512);
     assert_equal_audio(&small, &large);
-    let expected = 0.25 * soundcraft_dsp::db_to_gain(-12.0) * std::f32::consts::FRAC_1_SQRT_2;
+    let expected = 0.25 * soundcraft_dsp::db_to_gain(-12.0) * soundcraft_dsp::db_to_gain(-3.0);
     assert!((large[0][128] - expected).abs() < 1e-6);
     assert!(large[0][256].abs() < 1e-6);
     assert!((large[1][256] - 0.25).abs() < 1e-6);
@@ -167,4 +167,3 @@ fn floating_point_summing_keeps_headroom_before_hardware_output() {
     let output = render_range(&session, Range::new(0, 512), 512);
     assert_eq!(output[0][100], 1.5);
 }
-

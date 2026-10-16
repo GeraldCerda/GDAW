@@ -125,9 +125,8 @@ fn an_instrument_menu_searches_as_soon_as_it_opens() {
     let mut engine = soundcraft_engine::Engine::default();
     engine.execute("track.new", &json!({"kind": "instrument", "name": "Keys"})).unwrap();
     let mut h = harness(engine);
-    h.state_mut().ui.mix_views.push("instruments".into());
-    h.run_steps(2);
-    open(&mut h, "Instrument");
+    h.get_by_label("Insert A").click_secondary();
+    h.run_steps(3);
     type_text(&mut h, "drum");
     press(&mut h, Key::Enter);
     let instrument = h.state().engine.session().tracks[0].instrument.clone().unwrap();

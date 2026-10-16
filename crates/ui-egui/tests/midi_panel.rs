@@ -22,6 +22,8 @@ fn button(pos: Pos2, pressed: bool) -> Event {
 
 fn check_resize(with_clip: bool) {
     let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    app.ui.show_browser = false;
+    app.ui.show_devices = false;
     app.ui.show_midi_editor = true;
     if with_clip {
         app.run("edit.select", json!({"tracks": ["Keys"]})).unwrap();
@@ -101,6 +103,8 @@ fn legacy_visibility_sync_cancels_a_held_midi_divider_without_editing_the_sessio
 
 fn check_held_replacement(operation: &str) {
     let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    app.ui.show_browser = false;
+    app.ui.show_devices = false;
     app.ui.show_midi_editor = true;
     app.run("edit.select", json!({"tracks":["Keys"]})).unwrap();
     app.ui.show_memory_locations = operation == "arrange";
@@ -176,6 +180,8 @@ fn only_pencil_inserts_notes_in_the_midi_roll() {
     use soundcraft_model::{ClipContent, Tool};
 
     let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    app.ui.show_browser = false;
+    app.ui.show_devices = false;
     app.ui.show_midi_editor = true;
     let created = app.run("midi.new_clip", json!({"track": "Keys", "start": 0, "length": 96000})).unwrap();
     let clip = created["clip"].as_u64().unwrap();
@@ -188,6 +194,9 @@ fn only_pencil_inserts_notes_in_the_midi_roll() {
     let point = pos2(body.left() + 200.0, body.top() + 60.0);
     for tool in Tool::ALL.into_iter().filter(|tool| *tool != Tool::Pencil).chain([Tool::Pencil]) {
         app.run("edit.tool", json!({"tool": tool.id()})).unwrap();
+        for _ in 0..60 {
+            frame(&ctx, &mut app, vec![]);
+        }
         let before = app.engine.session().clone();
         frame(&ctx, &mut app, vec![Event::PointerMoved(point)]);
         frame(&ctx, &mut app, vec![button(point, true)]);

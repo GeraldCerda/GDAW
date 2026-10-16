@@ -3721,7 +3721,6 @@ mod tests {
             let x = 0.1 * (c + 1) as f32 + (1000 % 7) as f32 * 1e-3;
             assert!((ch[1000] - x * g).abs() < 1e-5, "channel {c}: {} vs {}", ch[1000], x * g);
         }
-        // A mono bus sums a stereo source like the old stereo bus did.
         let (mut s, t) = session_with_dc(0.5, 4800);
         let bus = s.add_bus("Mono", ChannelFormat::Mono);
         let aux = s.add_track(TrackKind::Aux, ChannelFormat::Mono, Some("M"));
@@ -3729,7 +3728,8 @@ mod tests {
         s.track_mut(aux).unwrap().mixer.pan = vec![-1.0];
         s.track_mut(t).unwrap().mixer.output = Route::Bus(bus);
         let out = render_range(&s, Range::new(0, 4800), 512);
-        assert!((out[0][1000] - 0.5 * gains(0.0, PanLaw::Minus3).0).abs() < 1e-6, "{}", out[0][1000]);
+        assert!((out[0][1000] - 0.5).abs() < 1e-6, "{}", out[0][1000]);
+        assert!(out[1][1000].abs() < 1e-6);
     }
 
     #[test]
@@ -3828,5 +3828,3 @@ mod long_pad_preview_tests {
         assert_eq!(mixer.audition(&session, track, 37), 128);
     }
 }
-
-

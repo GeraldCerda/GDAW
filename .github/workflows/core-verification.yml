@@ -1,0 +1,39 @@
+name: Core verification
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "apps/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/core-verification.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: core-verification-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - name: Fetch exact source archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/tarball/$GITHUB_SHA" > "$RUNNER_TEMP/source.tar.gz"
+          tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - name: Run core and UI regressions
+        run: cargo +stable test --no-fail-fast --locked --release -p soundcraft-dsp -p soundcraft-model -p soundcraft-engine -p soundcraft-mix -p soundcraft-playback -p soundcraft-ui-egui
+      - name: Build desktop binary
+        if: ${{ !cancelled() }}
+        run: cargo +stable build --locked --release -p soundcraft

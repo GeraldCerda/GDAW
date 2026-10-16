@@ -41,12 +41,13 @@ impl Rig {
         let name = &self.app.engine.session().tracks[i].name;
         self.shapes
             .iter()
-            .find_map(|c| match &c.shape {
-                Shape::Text(t) if t.galley.text() == name && t.pos.x < 150.0 => {
+            .filter_map(|c| match &c.shape {
+                Shape::Text(t) if t.galley.text() == name => {
                     Some(pos2(t.pos.x + 20.0, t.galley.rect.translate(t.pos.to_vec2()).center().y))
                 }
                 _ => None,
             })
+            .min_by(|a, b| a.x.total_cmp(&b.x))
             .expect("row not in the Tracks list")
     }
 

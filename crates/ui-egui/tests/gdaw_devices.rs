@@ -42,11 +42,18 @@ fn browser_effects_append_to_the_selected_track_and_can_be_undone() {
     let track = harness.state().engine.session().track_by_name("MIDI 1").unwrap().id;
     insert_item(harness.state_mut(), track, &BrowserItem::Plugin("compressor".into()));
     insert_item(harness.state_mut(), track, &BrowserItem::Plugin("eq_7band".into()));
-    let inserts = &harness.state().engine.session().track(track).unwrap().mixer.inserts;
-    assert_eq!(inserts[0].as_ref().unwrap().plugin, "compressor");
-    assert_eq!(inserts[1].as_ref().unwrap().plugin, "eq_7band");
+    let channel = harness.state().engine.session().track(track).unwrap();
+    assert_eq!(channel.instrument_insert_slot(), Some(0));
+    assert_eq!(channel.instrument.as_ref().unwrap().plugin, "drum_rack");
+    let inserts = &channel.mixer.inserts;
+    assert!(inserts[0].is_none());
+    assert_eq!(inserts[1].as_ref().unwrap().plugin, "compressor");
+    assert_eq!(inserts[2].as_ref().unwrap().plugin, "eq_7band");
     harness.state_mut().run("edit.undo", json!({})).unwrap();
-    assert!(harness.state().engine.session().track(track).unwrap().mixer.inserts[1].is_none());
+    let channel = harness.state().engine.session().track(track).unwrap();
+    assert!(channel.mixer.inserts[2].is_none());
+    assert_eq!(channel.mixer.inserts[1].as_ref().unwrap().plugin, "compressor");
+    assert_eq!(channel.instrument.as_ref().unwrap().plugin, "drum_rack");
 }
 
 #[test]
@@ -54,7 +61,7 @@ fn plugin_browser_exposes_developer_effect_and_format_choices() {
     let harness = harness();
     assert!(harness.query_all_by_label_contains("Developer").count() > 0);
     assert!(harness.query_all_by_label_contains("Effect").count() > 0);
-    assert!(harness.query_all_by_label_contains("All formats").count() > 0);
+    assert!(harness.query_all_by_label_contains("Format").count() > 0);
     assert_eq!(harness.state().browser.grouping, soundcraft_ui_egui::plugin_browser::PluginGrouping::Developer);
 }
 

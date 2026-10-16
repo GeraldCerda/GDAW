@@ -266,7 +266,7 @@ pub fn browser(app: &mut SoundApp, ui: &mut Ui) {
         ui.selectable_value(&mut app.browser.grouping, PluginGrouping::Developer, "Developer");
         ui.selectable_value(&mut app.browser.grouping, PluginGrouping::Effect, "Effect");
     });
-    egui::ComboBox::from_id_salt("browser_plugin_format").selected_text(app.browser.format.label()).show_ui(ui, |ui| {
+    egui::ComboBox::from_id_salt("browser_plugin_format").label("Format").selected_text(app.browser.format.label()).show_ui(ui, |ui| {
         for format in [PluginFormat::All, PluginFormat::Vst3, PluginFormat::Au, PluginFormat::Clap, PluginFormat::BuiltIn] {
             ui.selectable_value(&mut app.browser.format, format, format.label());
         }
@@ -474,7 +474,9 @@ fn pad_waveform(app: &mut SoundApp, ui: &mut Ui, track: TrackId, note: u8, sourc
 }
 
 pub fn chain(app: &mut SoundApp, ui: &mut Ui) {
-    ui.ctx().request_repaint_after_secs(0.03);
+    if app.player.is_some() {
+        ui.ctx().request_repaint_after_secs(0.03);
+    }
     let Some(track) = selected_track(app).and_then(|id| app.engine.session().track(id).cloned()) else {
         ui.label("Select a track to view its devices");
         return;
@@ -915,4 +917,3 @@ fn pad_effects(app: &mut SoundApp, ui: &mut Ui, track: TrackId, instrument: &Ins
         ui.weak("Drop an effect into A–J · before track inserts");
     });
 }
-

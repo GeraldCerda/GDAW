@@ -79,6 +79,7 @@ fn the_smart_tool_opens_it_from_the_lower_half_and_selects_from_the_upper_half()
     r.double_click(pos2(at.center().x, at.top() + at.height() * 0.25));
     assert!(!r.app.ui.show_midi_editor);
     assert_eq!(r.app.engine.session().edit.selected_clips, vec![keys]);
+    let (_, at) = r.clip("Keys");
     r.double_click(pos2(at.center().x, at.top() + at.height() * 0.75));
     assert_eq!(r.editing(), Some(keys));
 }

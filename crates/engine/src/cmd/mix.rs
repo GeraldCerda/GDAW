@@ -7,7 +7,7 @@ use soundcraft_model::{AutoParam, AutomationMode, INSERT_SLOTS, Insert, SEND_SLO
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
-        cmd!("mix.routing_diagnostics", "Routing Diagnostics", [], None, "{}", has_tracks, |e, _| {
+        cmd!("mix.routing_diagnostics", "Routing Diagnostics", ["Setup"], None, "{}", has_tracks, |e, _| {
             Ok(json!({"issues": soundcraft_mix::routing_diagnostics(e.session()).into_iter().map(|(track, problem)| json!({"track": track.0, "problem": problem})).collect::<Vec<_>>()}))
         }),
         cmd!("mix.volume", "Set Volume", [], None, "{tracks?, db: -144..12 | delta_db}", has_selection, volume),
@@ -908,4 +908,3 @@ mod tests {
         assert_eq!((sl.level_db, sl.pan, sl.mute, sl.pre_fader), (-9.0, 0.5, true, true));
     }
 }
-

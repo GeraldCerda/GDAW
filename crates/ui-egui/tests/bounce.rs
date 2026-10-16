@@ -52,7 +52,12 @@ fn a_bounce_renders_across_frames_with_progress_until_its_file_is_written() {
         h.step();
     }
     assert!(progress.is_sorted() && progress[0] < progress[3] && progress[3] < 1.0, "{progress:?}");
-    h.run();
+    for _ in 0..1_000 {
+        if h.state().bounce.is_none() {
+            break;
+        }
+        h.step();
+    }
     assert!(h.state().bounce.is_none());
     assert!(h.state().ui.status.starts_with("Bounced Mix.wav (peak"), "{}", h.state().ui.status);
     let (_, file) = soundcraft_audio_io::decode(&std::fs::read(dir.join("Mix.wav")).unwrap(), None).unwrap();

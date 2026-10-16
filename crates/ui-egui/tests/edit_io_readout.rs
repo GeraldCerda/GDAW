@@ -37,7 +37,8 @@ fn the_io_columns_vol_and_pan_readout_is_readable_in_both_themes() {
             .shapes
             .iter()
             .filter_map(|shape| match &shape.shape {
-                Shape::Text(text) if matches!(text.galley.job.text.as_str(), "vol" | "pan") => Some(text),
+                Shape::Text(text) if matches!(text.galley.job.text.as_str(), "vol" | "pan")
+                    && shape.clip_rect.contains(text.visual_bounding_rect().center()) => Some(text),
                 _ => None,
             })
             .collect();
@@ -48,7 +49,7 @@ fn the_io_columns_vol_and_pan_readout_is_readable_in_both_themes() {
                 .shapes
                 .iter()
                 .filter_map(|shape| match &shape.shape {
-                    Shape::Rect(rect) if rect.rect.contains(center) && rect.fill.a() == 255 => Some(rect),
+                    Shape::Rect(rect) if rect.rect.contains(center) && shape.clip_rect.contains(center) && rect.fill.a() == 255 => Some(rect),
                     _ => None,
                 })
                 .min_by(|a, b| a.rect.area().total_cmp(&b.rect.area()))

@@ -205,6 +205,7 @@ pub fn tree() -> Vec<MenuNode> {
         insert_path(&mut roots, line);
     }
     insert_path(&mut roots, "Window > Reset Panel Layout");
+    insert_path(&mut roots, "Setup > Routing Diagnostics");
     // Not in the incumbent catalog, but the only UI path to an empty MIDI clip (#282).
     // It creates a clip rather than acting on the selected ones, so it leads the Clip menu.
     insert_path(&mut roots, "Clip > New MIDI Clip");
