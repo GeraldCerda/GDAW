@@ -1,4 +1,4 @@
-GDAW Mac Test Kit v6
+GDAW Mac Test Kit v6.1
 
 Source revision: 964ecaa999ad8feb17bce77c3830005ba1e4b656
 Repository: https://github.com/GeraldCerda/GDAW
@@ -26,7 +26,9 @@ bash "$HOME/Downloads/GDAW_Test_Kit/build_test.sh" --verify
 
 Both verification options disable link-time optimization for test executables only, matching CI and avoiding repeated whole-program optimization for dozens of tests. The application build retains its normal release configuration. A failed compilation or test still stops installation. Formatting differences are recorded separately. --verify-ui runs only UI tests and is insufficient for a complete core regression pass.
 
-The script checks Apple Command Line Tools, installs or updates Rust when needed, downloads the exact pinned source, builds the native application and signs it locally. It installs GDAW Test.app in ~/Applications and keeps a previous tester as a timestamped backup. Test settings remain in ~/Library/Application Support/GDAW Test. Logs remain in this kit's logs directory.
+The script checks Apple Command Line Tools, installs or updates Rust when needed, downloads the exact pinned source, builds the native application and signs it locally. It installs GDAW Test.app in /Applications, reveals it in Finder, and keeps a previous tester as a timestamped backup. macOS may request your administrator password to move the app into /Applications. The launcher prefers /Applications and falls back to the older ~/Applications location. Test settings remain in ~/Library/Application Support/GDAW Test. Logs remain in this kit's logs directory.
+
+If v6 already installed the app in ~/Applications, open that folder in Finder and move GDAW Test.app into /Applications. Authenticate if macOS asks. This moves the existing build; no rebuild is needed. Preserve any existing app when Finder asks about a name conflict.
 
 The CI build did not launch the application, create or install an app bundle, or exercise physical audio hardware. Installation, signing, interactive use on your Mac, Apollo input/output and recording, device-clock drift, hosted plugins and real-time deadlines still need validation. This is not a production-readiness certification.
 

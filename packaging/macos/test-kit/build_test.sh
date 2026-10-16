@@ -121,14 +121,32 @@ printf 'APPL????' > "$app/Contents/PkgInfo"
 /usr/bin/codesign --force --sign - --timestamp=none --entitlements "$source_dir/packaging/macos/entitlements.plist" "$app"
 /usr/bin/codesign --verify --strict --deep "$app"
 
-destination="$HOME/Applications/GDAW Test.app"
-mkdir -p "$HOME/Applications"
-if [ -e "$destination" ]; then
-    backup="$HOME/Applications/GDAW Test $(date +%Y%m%d-%H%M%S).app"
-    mv "$destination" "$backup"
+destination="/Applications/GDAW Test.app"
+backup=""
+install_move() {
+    if [ -w /Applications ]; then
+        /bin/mv "$1" "$2"
+    else
+        sudo /bin/mv "$1" "$2"
+    fi
+}
+if [ -e "$destination" ] || [ -L "$destination" ]; then
+    backup="/Applications/GDAW Test Backup $(date +%Y%m%d-%H%M%S)-$.app"
+    if [ -e "$backup" ] || [ -L "$backup" ]; then
+        printf 'Backup destination already exists: %s\n' "$backup" >&2
+        exit 1
+    fi
+    install_move "$destination" "$backup"
     printf 'Previous tester kept at: %s\n' "$backup"
 fi
-mv "$app" "$destination"
+if ! install_move "$app" "$destination"; then
+    if [ -n "$backup" ] && [ ! -e "$destination" ] && [ ! -L "$destination" ]; then
+        install_move "$backup" "$destination"
+    fi
+    printf 'Installation failed. Staged application: %s\n' "$app" >&2
+    exit 1
+fi
 rmdir "$stage"
 printf '\nInstalled tester: %s\n' "$destination"
+/usr/bin/open -R "$destination"
 bash "$kit_dir/launch_test.sh"

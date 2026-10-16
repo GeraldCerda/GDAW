@@ -6,7 +6,10 @@ if [ "$(uname -s)" != "Darwin" ]; then
     printf 'Run this launcher on your Mac.\n' >&2
     exit 2
 fi
-binary="$HOME/Applications/GDAW Test.app/Contents/MacOS/GDAW-Test"
+binary="/Applications/GDAW Test.app/Contents/MacOS/GDAW-Test"
+if [ ! -x "$binary" ]; then
+    binary="$HOME/Applications/GDAW Test.app/Contents/MacOS/GDAW-Test"
+fi
 if [ ! -x "$binary" ]; then
     printf 'Build the tester first with: bash "%s/build_test.sh"\n' "$kit_dir" >&2
     exit 1
