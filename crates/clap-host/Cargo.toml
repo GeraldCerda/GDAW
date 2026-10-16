@@ -12,6 +12,7 @@ soundcraft-dsp.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 log.workspace = true
+concurrent-queue = "2.5"
 
 # The Windows host window for embedded editors (a top-level HWND the plugin parents its GUI in).
 [target.'cfg(windows)'.dependencies]

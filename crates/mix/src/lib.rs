@@ -74,6 +74,10 @@ pub fn main_channels(s: &Session) -> usize {
     s.main_format().channels().clamp(MAIN_CHANNELS, MAX_CHANNELS)
 }
 
+pub fn device_channels(session: &Session) -> usize {
+    session.outputs.iter().map(|path| usize::from(path.first_channel).saturating_add(path.format.channels())).max().unwrap_or_else(|| main_channels(session)).clamp(2, 64)
+}
+
 /// Slot index used for a track's instrument plugin in [`InstanceSpec`] and [`PreparedInstance`]
 /// (insert slots use their index).
 pub const INSTRUMENT_SLOT: usize = usize::MAX;
@@ -244,6 +248,9 @@ struct PluginSlot {
     failed: bool,
     sample: Vec<Vec<f32>>,
     pending: bool,
+    outputs: Vec<Vec<Vec<f32>>>,
+    key_audio: Vec<Vec<f32>>,
+    key_delay: DelayLine,
 }
 
 struct Strip {
@@ -273,6 +280,7 @@ struct Strip {
     send_align: Vec<DelayLine>,
     sendbuf: Vec<Vec<f32>>,
     out_extra: DelayLine,
+    input_align: DelayLine,
     outbuf: Vec<Vec<f32>>,
     failures: PluginFailures,
     solo_audible: bool,
@@ -283,6 +291,9 @@ fn inherit_slot(next: &mut Option<PluginSlot>, old: &mut Option<PluginSlot>) {
         && next.id == old.id && next.ch == old.ch && !old.pending
     {
         std::mem::swap(&mut next.plugin, &mut old.plugin);
+        std::mem::swap(&mut next.outputs, &mut old.outputs);
+        if next.key_delay.bufs.is_empty() { std::mem::swap(&mut next.key_delay, &mut old.key_delay); }
+        else { inherit_delay(&mut next.key_delay, &mut old.key_delay); }
         std::mem::swap(&mut next.pending, &mut old.pending);
         std::mem::swap(&mut next.failed, &mut old.failed);
         next.applied.fill(f32::NAN);
@@ -412,6 +423,7 @@ impl Strip {
             send_align: Vec::new(),
             sendbuf: Vec::new(),
             out_extra: DelayLine::default(),
+            input_align: DelayLine::default(),
             outbuf: Vec::new(),
             failures: PluginFailures::default(),
             solo_audible: false,
@@ -427,6 +439,8 @@ pub struct MixEngine {
     strips: HashMap<TrackId, Strip>,
     busses: HashMap<BusId, BusBuf>,
     main: Vec<Vec<f32>>,
+    hardware: HashMap<String, BusBuf>,
+    main_path: String,
     main_fmt: ChannelFormat,
     pub meters: HashMap<TrackId, StripMeter>,
     pub main_meter: StripMeter,
@@ -506,7 +520,11 @@ impl SlotCtx<'_> {
             create_instance(&ins.plugin, state.as_deref(), self.sr, self.mb, ch).map(|n| n.plugin)
         }?;
         let count = if ins.plugin == "drum_rack" { plugin.info().params.len() } else { ins.params.len() };
-        Some(PluginSlot { id: ins.plugin.clone(), ch, plugin, applied: vec![f32::NAN; count], failed: pending, sample: vec![vec![0.0; 1]; ch], pending })
+        let outputs = (1..plugin.output_bus_count().min(16)).map(|index| {
+            let channels = plugin.output_bus(index).map_or(0, |bus| bus.len()).min(MAX_CHANNELS);
+            vec![vec![0.0; self.mb]; channels]
+        }).collect();
+        Some(PluginSlot { id: ins.plugin.clone(), ch, plugin, applied: vec![f32::NAN; count], failed: pending, sample: vec![vec![0.0; 1]; ch], pending, outputs, key_audio: vec![vec![0.0; self.mb]; 2], key_delay: DelayLine::default() })
     }
 }
 
@@ -537,6 +555,7 @@ impl MixEngine {
                 next.chase = old.chase;
             }
             next.pad_effects.inherit(&mut old.pad_effects, track.id, fresh);
+            if track.mixer.input == old_track.mixer.input { inherit_delay(&mut next.input_align, &mut old.input_align); }
             if track.mixer.output == old_track.mixer.output { inherit_delay(&mut next.out_extra, &mut old.out_extra); }
             for (index, (next, old)) in next.send_align.iter_mut().zip(&mut old.send_align).enumerate() {
                 if track.mixer.sends.get(index).and_then(Option::as_ref).map(|send| &send.target)
@@ -554,6 +573,8 @@ impl MixEngine {
             strips: HashMap::new(),
             busses: HashMap::new(),
             main: vec![vec![0.0; max_block]; MAIN_CHANNELS],
+            hardware: HashMap::new(),
+            main_path: String::new(),
             main_fmt: ChannelFormat::Stereo,
             meters: HashMap::new(),
             main_meter: StripMeter::default(),
@@ -621,7 +642,7 @@ impl MixEngine {
     }
 
     pub fn delay_capacity_exceeded(&self) -> bool {
-        self.strips.values().any(|strip| strip.out_extra.overflow || strip.send_align.iter().any(|delay| delay.overflow) || strip.pad_effects.capacity_exceeded())
+        self.strips.values().any(|strip| strip.out_extra.overflow || strip.input_align.overflow || strip.plugins.iter().flatten().chain(strip.instrument.iter()).any(|slot| slot.key_delay.overflow) || strip.send_align.iter().any(|delay| delay.overflow) || strip.pad_effects.capacity_exceeded())
     }
 
     /// Format of the main mix as of the last sync.
@@ -652,6 +673,8 @@ impl MixEngine {
             s.chase = true;
             s.send_align.iter_mut().for_each(DelayLine::clear);
             s.out_extra.clear();
+            s.input_align.clear();
+            for slot in s.plugins.iter_mut().flatten().chain(s.instrument.iter_mut()) { slot.key_delay.clear(); }
         }
         for meter in self.meters.values_mut().chain(std::iter::once(&mut self.main_meter)) {
             meter.peak = [0.0; 2];
@@ -669,6 +692,14 @@ impl MixEngine {
         let mb = self.max_block;
         let main_ch = main_channels(s);
         self.main_fmt = s.main_format();
+        self.main_path = s.outputs.first().map(|path| path.name.clone()).unwrap_or_default();
+        self.hardware.retain(|name, _| s.outputs.iter().any(|path| &path.name == name));
+        for path in s.outputs.iter().skip(1) {
+            let bus = self.hardware.entry(path.name.clone()).or_insert_with(|| BusBuf { fmt: path.format, buf: Vec::new(), arrival: 0, master_latency: 0, master_processed: false });
+            bus.fmt = path.format;
+            bus.buf.resize_with(path.format.channels().clamp(1, MAX_CHANNELS), || vec![0.0; mb]);
+            for channel in &mut bus.buf { channel.resize(mb, 0.0); }
+        }
         if self.main.len() != main_ch {
             self.main = vec![vec![0.0; mb]; main_ch];
         }
@@ -773,13 +804,16 @@ impl MixEngine {
                 .saturating_add(strip.pad_effects.latency)
         }).fold(8192usize, usize::saturating_add).min(1 << 24);
         let width = s.tracks.iter().filter_map(|track| self.strips.get(&track.id).map(|strip| (track, strip))).map(|(track, strip)| {
-            strip.buf.len().saturating_mul(1usize.saturating_add(track.mixer.sends.iter().flatten().count())
+            strip.buf.len().saturating_mul(2usize.saturating_add(track.mixer.sends.iter().flatten().count())
                 .saturating_add(if strip.pad_effects.enabled { 32 } else { 0 }))
+                .saturating_add(2usize.saturating_mul(strip.plugins.iter().flatten().chain(strip.instrument.iter()).filter(|slot| slot.plugin.has_sidechain()).count()))
         }).fold(0usize, usize::saturating_add).max(1);
         let budget = planned.min((1usize << 24) / width).max(1);
         for track in &s.tracks {
             if let Some(strip) = self.strips.get_mut(&track.id) {
                 strip.out_extra.reserve(budget, strip.buf.len());
+                strip.input_align.reserve(budget, strip.buf.len());
+                for slot in strip.plugins.iter_mut().flatten().chain(strip.instrument.iter_mut()).filter(|slot| slot.plugin.has_sidechain()) { slot.key_delay.reserve(budget, 2); }
                 strip.pad_effects.reserve(budget);
                 for (delay, send) in strip.send_align.iter_mut().zip(&track.mixer.sends) {
                     if send.is_some() { delay.reserve(budget, strip.buf.len()); }
@@ -868,7 +902,7 @@ impl MixEngine {
             meter.peaks.fill(0.0);
             meter.gain_reduction_db = 0.0;
         }
-        for b in self.busses.values_mut() {
+        for b in self.busses.values_mut().chain(self.hardware.values_mut()) {
             for c in b.buf.iter_mut() {
                 c.iter_mut().take(frames).for_each(|x| *x = 0.0);
             }
@@ -879,7 +913,7 @@ impl MixEngine {
         let any_solo = s.tracks.iter().any(|t| t.mixer.solo && !t.inactive);
         let order = std::mem::take(&mut self.order);
         let live = |t: &Track| !(t.kind == TrackKind::Master || t.inactive || t.kind == TrackKind::Vca);
-        let is_aux = |t: &Track| matches!(t.kind, TrackKind::Aux | TrackKind::Folder);
+        let is_aux = |t: &Track| deferred_track(s, t);
         // Phase 1: independent strips (audio, instrument, MIDI) in parallel.
         let mut work = std::mem::take(&mut self.work);
         work.clear();
@@ -904,7 +938,7 @@ impl MixEngine {
         self.busses = busses;
         let pdc = s.edit.delay_compensation;
         self.path_latency.fill(0);
-        for bus in self.busses.values_mut() {
+        for bus in self.busses.values_mut().chain(self.hardware.values_mut()) {
             bus.arrival = 0;
             bus.master_latency = 0;
             bus.master_processed = false;
@@ -925,6 +959,8 @@ impl MixEngine {
                         Route::Bus(id) => {
                             if let Some(bus) = self.busses.get_mut(id) { bus.master_latency = bus.master_latency.saturating_add(latency); }
                         }
+                        Route::Hardware(name) if name == &self.main_path => master_latency = master_latency.saturating_add(latency),
+                        Route::Hardware(name) => { if let Some(bus) = self.hardware.get_mut(name) { bus.master_latency = bus.master_latency.saturating_add(latency); } }
                         _ => {}
                     }
                 } else if let Some(value) = self.path_latency.get_mut(i) {
@@ -944,6 +980,10 @@ impl MixEngine {
             } else {
                 0
             };
+            let key_arrival = (0..=soundcraft_model::INSERT_SLOTS).filter_map(|slot| plugin_sidechain(s, t.id, slot)).filter_map(|bus| self.busses.get(&bus)).map(|bus| bus.arrival.saturating_add(bus.master_latency)).max().unwrap_or(0);
+            let padding = key_arrival.saturating_sub(input);
+            if let Some(strip) = self.strips.get_mut(&t.id) { strip.input_align.set(padding, strip.buf.len()); }
+            let input = input.max(key_arrival);
             let Some(arrival) = self.path_latency.get_mut(i) else { continue };
             *arrival = input.saturating_add(*arrival);
             for route in std::iter::once(&t.mixer.output).chain(t.mixer.sends.iter().flatten().map(|send| &send.target)) {
@@ -954,7 +994,14 @@ impl MixEngine {
                             bus.arrival = bus.arrival.max(*arrival);
                         }
                     }
+                    Route::Hardware(name) if name == &self.main_path => self.main_arrival = self.main_arrival.max(*arrival),
+                    Route::Hardware(name) => { if let Some(bus) = self.hardware.get_mut(name) { bus.arrival = bus.arrival.max(*arrival); } }
                     _ => {}
+                }
+            }
+            for slot in 0..=soundcraft_model::INSERT_SLOTS {
+                for output in 1..16 {
+                    if let Some(bus) = plugin_output(s, t.id, slot, output).and_then(|bus| self.busses.get_mut(&bus)) { bus.arrival = bus.arrival.max(*arrival); }
                 }
             }
         }
@@ -964,7 +1011,7 @@ impl MixEngine {
         }
         for (i, st) in work.iter_mut() {
             if let Some(t) = s.tracks.get(*i) {
-                self.route_strip(t, st, pos, frames);
+                self.route_strip(s, t, st, pos, frames);
             }
         }
         for (i, st) in work.drain(..) {
@@ -975,11 +1022,12 @@ impl MixEngine {
             }
         }
         self.work = work;
-        let is_aux = |t: &Track| matches!(t.kind, TrackKind::Aux | TrackKind::Folder);
+        let is_aux = |t: &Track| deferred_track(s, t);
         // Phase 2: auxes in dependency order (they read busses).
         for &i in &order {
             let Some(t) = s.tracks.get(i).filter(|t| live(t) && is_aux(t)) else { continue };
             if let Route::Bus(bus) = &t.mixer.input { self.process_bus_masters(s, *bus, pos, frames); }
+            for slot in 0..=soundcraft_model::INSERT_SLOTS { if let Some(bus) = plugin_sidechain(s, t.id, slot) { self.process_bus_masters(s, bus, pos, frames); } }
             let Some(st) = self.strips.get_mut(&t.id) else { continue };
             let mut st = std::mem::replace(st, Strip::new());
             if st.scratch.len() < self.max_block {
@@ -988,19 +1036,28 @@ impl MixEngine {
             let live_in = LiveInput { input: &self.input, monitor_only: self.monitor_only, recording: self.recording, audition_track: self.audition_track };
             process_strip(s, t, &mut st, &self.busses, &live_in, pos, frames, any_solo);
             st.arrival = self.path_latency.get(i).copied().unwrap_or(0);
-            self.route_strip(t, &mut st, pos, frames);
+            self.route_strip(s, t, &mut st, pos, frames);
             if let Some(destination) = self.strips.get_mut(&t.id) { *destination = st; }
         }
         for bus in &s.busses { self.process_bus_masters(s, bus.id, pos, frames); }
         self.order = order;
         // Master faders process the main mix.
         let transport = transport_at(s, pos, !self.monitor_only, self.recording);
-        for track in s.tracks.iter().filter(|track| track.kind == TrackKind::Master && !track.inactive && track.mixer.output == Route::Main) {
+        for track in s.tracks.iter().filter(|track| track.kind == TrackKind::Master && !track.inactive && (track.mixer.output == Route::Main || matches!(&track.mixer.output, Route::Hardware(name) if name == &self.main_path))) {
             if let Some(strip) = self.strips.get_mut(&track.id) {
                 process_master(s, track, strip, pos, frames, &transport, &mut self.main);
                 if let Some(meter) = self.meters.get_mut(&track.id) {
                     meter.measure(&self.main, frames, 0.0);
                     meter.plugin_failures = strip.failures;
+                }
+            }
+        }
+        for path in s.outputs.iter().skip(1) {
+            let Some(bus) = self.hardware.get_mut(&path.name) else { continue };
+            for track in s.tracks.iter().filter(|track| track.kind == TrackKind::Master && !track.inactive && matches!(&track.mixer.output, Route::Hardware(name) if name == &path.name)) {
+                if let Some(strip) = self.strips.get_mut(&track.id) {
+                    process_master(s, track, strip, pos, frames, &transport, &mut bus.buf);
+                    if let Some(meter) = self.meters.get_mut(&track.id) { meter.measure(&bus.buf, frames, 0.0); meter.plugin_failures = strip.failures; }
                 }
             }
         }
@@ -1022,6 +1079,39 @@ impl MixEngine {
             }
         }
         self.main_meter.measure(&self.main, frames, 0.0);
+    }
+
+    pub fn flush_parameters(&mut self, session: &Session) {
+        for track in &session.tracks {
+            let Some(strip) = self.strips.get_mut(&track.id) else { continue };
+            for (slot, insert) in strip.plugins.iter_mut().zip(&track.mixer.inserts) {
+                if let (Some(slot), Some(insert)) = (slot, insert) && slot.id.starts_with("clap:") { apply_values(slot, insert, |_, value| value); slot.plugin.flush_parameters(); }
+            }
+            if let (Some(slot), Some(insert)) = (&mut strip.instrument, &track.instrument) && slot.id.starts_with("clap:") { apply_values(slot, insert, |_, value| value); slot.plugin.flush_parameters(); }
+        }
+    }
+
+    pub fn render_device(&mut self, session: &Session, pos: Samples, frames: usize, out: &mut [Vec<f32>]) {
+        self.render(session, pos, frames, out);
+        if self.preparation_required { return; }
+        let frames = frames.min(self.max_block);
+        for channel in out.iter_mut() { channel.iter_mut().take(frames).for_each(|sample| *sample = 0.0); }
+        let first = session.outputs.first().map_or(0, |path| usize::from(path.first_channel));
+        for (index, channel) in self.main.iter().enumerate() {
+            if let Some(destination) = out.get_mut(first.saturating_add(index)) {
+                for (destination, sample) in destination.iter_mut().zip(channel).take(frames) { *destination += *sample; }
+            }
+        }
+        for path in session.outputs.iter().skip(1) {
+            if let Some(bus) = self.hardware.get(&path.name) {
+                for (index, channel) in bus.buf.iter().enumerate() {
+                    if let Some(destination) = out.get_mut(usize::from(path.first_channel).saturating_add(index)) {
+                        for (destination, sample) in destination.iter_mut().zip(channel).take(frames) { *destination += *sample; }
+                    }
+                }
+            }
+        }
+        for channel in out { for sample in channel.iter_mut().take(frames) { if !sample.is_finite() { *sample = 0.0; } } }
     }
 
     fn process_bus_masters(&mut self, session: &Session, id: BusId, pos: Samples, frames: usize) {
@@ -1062,7 +1152,23 @@ impl MixEngine {
     }
 
     /// Send, meter and pan a processed strip into the busses / main mix.
-    fn route_strip(&mut self, t: &Track, strip: &mut Strip, pos: Samples, frames: usize) {
+    fn route_strip(&mut self, session: &Session, t: &Track, strip: &mut Strip, pos: Samples, frames: usize) {
+        let track_mute = automation_lane(t, &AutoParam::Mute);
+        let vca_mute = t.mixer.vca.and_then(|id| session.tracks.iter().find(|track| track.id.0 == id && track.kind == TrackKind::Vca && !track.inactive)).and_then(|track| automation_lane(track, &AutoParam::Mute));
+        for (address, plugin) in strip.plugins.iter().enumerate().map(|(address, plugin)| (address, plugin.as_ref())).chain(std::iter::once((t.instrument_insert_slot().unwrap_or(0), strip.instrument.as_ref()))) {
+            let model = if t.instrument_insert_slot() == Some(address) { t.instrument.as_ref() } else { t.mixer.inserts.get(address).and_then(Option::as_ref) };
+            if model.is_none_or(|insert| !insert.active || insert.bypass) { continue; }
+            let Some(plugin) = plugin.filter(|plugin| !plugin.failed) else { continue };
+            for (index, source) in plugin.outputs.iter().enumerate() {
+                let Some(target) = plugin_output(session, t.id, address, index + 1).and_then(|bus| self.busses.get_mut(&bus)) else { continue };
+                let matrix = build_matrix(ChannelFormat::for_channels(source.len()), source.len(), target.fmt, target.buf.len(), &PanSpec { stereo: [-1.0, 1.0], surround: None }, self.pan_law);
+                for frame in 0..frames {
+                    let at = pos.saturating_add(frame as i64);
+                    let muted = strip.muted || track_mute.is_some_and(|lane| lane.value_at(at, 0.0) >= 0.5) || vca_mute.is_some_and(|lane| lane.value_at(at, 0.0) >= 0.5);
+                    apply_matrix_span(source, frame..frame + 1, &mut target.buf, &matrix, if muted { 0.0 } else { 1.0 });
+                }
+            }
+        }
         let m = self.meters.entry(t.id).or_default();
         m.measure(&strip.buf, frames, strip.gr);
         m.plugin_failures = strip.failures;
@@ -1070,11 +1176,16 @@ impl MixEngine {
         let law = self.pan_law;
         for (i, snd) in t.mixer.sends.iter().enumerate() {
             let Some(snd) = snd else { continue };
-            let Route::Bus(bus) = &snd.target else { continue };
-            let Some(dst) = self.busses.get_mut(bus) else { continue };
+            let (destination, destination_format, arrival) = match &snd.target {
+                Route::Bus(bus) => { let Some(bus) = self.busses.get_mut(bus) else { continue }; (&mut bus.buf, bus.fmt, bus.arrival) }
+                Route::Main => (&mut self.main, self.main_fmt, self.main_arrival),
+                Route::Hardware(name) if name == &self.main_path => (&mut self.main, self.main_fmt, self.main_arrival),
+                Route::Hardware(name) => { let Some(bus) = self.hardware.get_mut(name) else { continue }; (&mut bus.buf, bus.fmt, bus.arrival) }
+                Route::None => continue,
+            };
             let mut src = if snd.pre_fader { &strip.pre } else { &strip.buf };
             if let Some(delay) = strip.send_align.get_mut(i) {
-                delay.set(dst.arrival.saturating_sub(strip.arrival), src.len());
+                delay.set(arrival.saturating_sub(strip.arrival), src.len());
                 copy_audio(src, &mut strip.sendbuf, frames);
                 delay.process(&mut strip.sendbuf, frames);
                 src = &strip.sendbuf;
@@ -1084,28 +1195,31 @@ impl MixEngine {
             let mute = automation_lane(t, &AutoParam::SendMute(slot));
             let pan = automation_lane(t, &AutoParam::SendPan(slot));
             let follow = if snd.follow_main_pan { automation_lane(t, &AutoParam::Pan(0)) } else { None };
-            let animated = level.is_some() || mute.is_some() || pan.is_some() || follow.is_some();
+            let animated = level.is_some() || mute.is_some() || pan.is_some() || follow.is_some() || track_mute.is_some() || vca_mute.is_some();
             let step = if animated { 1 } else { frames.max(1) };
             for start in (0..frames).step_by(step) {
                 let at = pos.saturating_add(start as i64);
-                let muted = snd.mute || strip.muted || mute.is_some_and(|lane| lane.value_at(at, 0.0) >= 0.5);
+                let muted = strip.muted || track_mute.is_some_and(|lane| lane.value_at(at, 0.0) >= 0.5) || vca_mute.is_some_and(|lane| lane.value_at(at, 0.0) >= 0.5)
+                    || mute.map_or(snd.mute, |lane| lane.value_at(at, if snd.mute { 1.0 } else { 0.0 }) >= 0.5);
                 let gain = if muted { 0.0 } else { db_to_gain(level.map_or(snd.level_db, |lane| lane.value_at(at, snd.level_db))) };
                 let base = if snd.follow_main_pan { pan_at(t, 0, at) } else { snd.pan };
                 let value = pan.map_or(base, |lane| lane.value_at(at, base));
                 let stereo = if src.len() == 1 { [value, 0.0] } else { [-1.0, 1.0] };
                 let surround = snd.surround.as_ref().or(if snd.follow_main_pan { t.mixer.surround.as_ref() } else { None });
-                let matrix = build_matrix(src_fmt, src.len(), dst.fmt, dst.buf.len(), &PanSpec { stereo, surround }, law);
-                apply_matrix_span(src, start..start.saturating_add(step).min(frames), &mut dst.buf, &matrix, gain);
+                let matrix = build_matrix(src_fmt, src.len(), destination_format, destination.len(), &PanSpec { stereo, surround }, law);
+                apply_matrix_span(src, start..start.saturating_add(step).min(frames), destination, &matrix, gain);
             }
         }
         let delay = match &t.mixer.output {
             Route::Main => self.main_arrival.saturating_sub(strip.arrival),
             Route::Bus(bus) => self.busses.get(bus).map_or(0, |bus| bus.arrival.saturating_sub(strip.arrival)),
+            Route::Hardware(name) if name == &self.main_path => self.main_arrival.saturating_sub(strip.arrival),
+            Route::Hardware(name) => self.hardware.get(name).map_or(0, |bus| bus.arrival.saturating_sub(strip.arrival)),
             _ => 0,
         };
         strip.out_extra.set(delay, strip.buf.len());
         let src: &[Vec<f32>] = match &t.mixer.output {
-            Route::Main | Route::Bus(_) => {
+            Route::Main | Route::Bus(_) | Route::Hardware(_) => {
                 if strip.outbuf.len() != strip.buf.len() {
                     strip.outbuf = vec![Vec::new(); strip.buf.len()];
                 }
@@ -1124,7 +1238,9 @@ impl MixEngine {
                 Some(d) => (&mut d.buf, d.fmt),
                 None => return,
             },
-            _ => return,
+            Route::Hardware(name) if name == &self.main_path => (&mut self.main, self.main_fmt),
+            Route::Hardware(name) => match self.hardware.get_mut(name) { Some(bus) => (&mut bus.buf, bus.fmt), None => return },
+            Route::None => return,
         };
         let mut start = 0;
         while start < frames {
@@ -1160,11 +1276,86 @@ fn process_master(session: &Session, track: &Track, strip: &mut Strip, pos: Samp
         if let (Some(insert), Some(Some(slot))) = (insert, strip.plugins.get_mut(address))
             && insert.active && !insert.bypass && !slot.failed
         {
-            process_insert(slot, insert, track, address, session, pos, transport, &mut strip.buf, frames);
+            process_insert(slot, insert, track, address, session, pos, transport, &mut strip.buf, frames, None);
             if contain_failure(slot, &mut strip.buf, frames) { strip.failures.record(address); }
         }
     }
     copy_audio(&strip.buf, audio, frames);
+}
+
+fn process_instrument(s: &Session, t: &Track, strip: &mut Strip, busses: &HashMap<BusId, BusBuf>, live: &LiveInput<'_>, pos: Samples, frames: usize) {
+    if live.monitor_only && live.audition_track != Some(t.id) { return; }
+    let transport = transport_at(s, pos, !live.monitor_only, live.recording);
+    if let Some(inst) = strip.instrument.as_mut().filter(|i| !i.failed && t.instrument.as_ref().is_some_and(|insert| insert.active && !insert.bypass)) {
+        if let Some(ins) = &t.instrument {
+            apply_params(inst, ins, t, INSTRUMENT_SLOT, pos);
+        }
+        let address = t.instrument_insert_slot().unwrap_or(INSTRUMENT_SLOT);
+        let sidechain = sidechain_input(s, t, address, busses);
+        prepare_sidechain(inst, sidechain, frames);
+        if t.instrument_slot.is_some() && has_plugin_automation(t, address) {
+            if !live.monitor_only && std::mem::take(&mut strip.chase) { chase_controllers(s, t, pos, inst); }
+            let mono = strip.buf.len() == 1;
+            for frame in 0..frames {
+                let at = pos.saturating_add(frame as i64);
+                let transport = transport_at(s, at, !live.monitor_only, live.recording);
+                if let Some(model) = &t.instrument { apply_params(inst, model, t, INSTRUMENT_SLOT, at); }
+                inst.plugin.set_transport(&transport);
+                if !live.monitor_only { schedule_notes(s, t, at, 1, inst, &mut strip.held); }
+                if inst.id == "drum_rack" && strip.pad_effects.enabled {
+                    if let Some(model) = &t.instrument {
+                        strip.pad_effects.process(inst, model, &transport, &mut strip.instrumentbuf, 1, &mut strip.failures);
+                    }
+                } else {
+                    for channel in &mut strip.instrumentbuf { channel.fill(0.0); }
+                    inst.plugin.set_sidechain(if sidechain.is_some() { inst.key_audio.as_slice() } else { &[] }, frame, 1);
+                    inst.plugin.process(&mut strip.instrumentbuf, 1);
+                }
+                capture_outputs(inst, frame, 1);
+                for (index, channel) in strip.buf.iter_mut().enumerate() {
+                    let sample = strip.instrumentbuf.get(index).and_then(|channel| channel.first()).copied().unwrap_or(0.0);
+                    if let Some(destination) = channel.get_mut(frame) {
+                        *destination = if mono {
+                            0.5 * (sample + strip.instrumentbuf.get(1).and_then(|channel| channel.first()).copied().unwrap_or(0.0))
+                        } else { sample };
+                    }
+                }
+            }
+        } else {
+            inst.plugin.set_transport(&transport);
+            if !live.monitor_only {
+                if std::mem::take(&mut strip.chase) {
+                    chase_controllers(s, t, pos, inst);
+                }
+                schedule_notes(s, t, pos, frames, inst, &mut strip.held);
+            }
+            if inst.id == "drum_rack" && strip.pad_effects.enabled {
+                if let Some(model) = &t.instrument {
+                    strip.pad_effects.process(inst, model, &transport, &mut strip.buf, frames, &mut strip.failures);
+                }
+            } else if strip.buf.len() >= 2 {
+                inst.plugin.set_sidechain(if sidechain.is_some() { inst.key_audio.as_slice() } else { &[] }, 0, frames);
+                inst.plugin.process(&mut strip.buf, frames);
+            } else if let Some(c0) = strip.buf.first_mut() {
+                let mut st = [std::mem::take(c0), std::mem::take(&mut strip.scratch)];
+                inst.plugin.set_sidechain(if sidechain.is_some() { inst.key_audio.as_slice() } else { &[] }, 0, frames);
+                inst.plugin.process(&mut st, frames);
+                let [a, b] = st;
+                *c0 = a;
+                strip.scratch = b;
+                for (x, y) in c0.iter_mut().zip(strip.scratch.iter()).take(frames) {
+                    *x = 0.5 * (*x + *y);
+                }
+            }
+        }
+        if !(t.instrument_slot.is_some() && has_plugin_automation(t, address)) { capture_outputs(inst, 0, frames); }
+        let trim = db_to_gain(t.mixer.trim_db) * if t.mixer.phase_invert { -1.0 } else { 1.0 };
+        for channel in &mut strip.buf { for sample in channel.iter_mut().take(frames) { *sample *= trim; } }
+        strip.input_align.process(&mut strip.buf, frames);
+        if contain_failure(inst, &mut strip.buf, frames) {
+            strip.failures.record(INSTRUMENT_SLOT);
+        }
+    }
 }
 
 fn process_strip(
@@ -1177,6 +1368,9 @@ fn process_strip(
     frames: usize,
     any_solo: bool,
 ) {
+    for plugin in strip.plugins.iter_mut().flatten().chain(strip.instrument.iter_mut()) {
+        for bus in &mut plugin.outputs { for channel in bus { channel.iter_mut().take(frames).for_each(|sample| *sample = 0.0); } }
+    }
     for c in strip.buf.iter_mut() {
         c.iter_mut().take(frames).for_each(|x| *x = 0.0);
     }
@@ -1228,6 +1422,15 @@ fn process_strip(
                 }
             }
         }
+        TrackKind::Aux | TrackKind::Folder if t.mixer.input.hardware_input_start().is_some() => {
+            if let Some(first) = t.mixer.input.hardware_input_start() {
+                for (index, destination) in strip.buf.iter_mut().enumerate() {
+                    if let Some(source) = live.input.get(first.saturating_add(index)) {
+                        for (destination, sample) in destination.iter_mut().zip(source).take(frames) { *destination = *sample; }
+                    }
+                }
+            }
+        }
         TrackKind::Aux | TrackKind::Folder => {
             if let Route::Bus(b) = &t.mixer.input
                 && let Some(src) = busses.get(b)
@@ -1249,76 +1452,11 @@ fn process_strip(
                 apply_matrix(&src.buf, frames, &mut strip.buf, &m, 1.0);
             }
         }
-        TrackKind::Instrument | TrackKind::Midi => {
-            if let Some(inst) = strip.instrument.as_mut().filter(|i| !i.failed && t.instrument.as_ref().is_some_and(|insert| insert.active && !insert.bypass)) {
-                // #152: push the instrument's stored parameter values into the live plugin
-                // before processing, the same way inserts do below. Without this, the values
-                // loaded from a session (or set via `mix.insert_state`) never reach the plugin
-                // instance and the rendered audio matches the plugin's defaults — e.g. a saved
-                // `level = -12 dB` sounds the same as `level = -6 dB`.
-                if let Some(ins) = &t.instrument {
-                    apply_params(inst, ins, t, INSTRUMENT_SLOT, pos);
-                }
-                let address = t.instrument_insert_slot().unwrap_or(INSTRUMENT_SLOT);
-                if t.instrument_slot.is_some() && has_plugin_automation(t, address) {
-                    if !live.monitor_only && std::mem::take(&mut strip.chase) { chase_controllers(s, t, pos, inst); }
-                    let mono = strip.buf.len() == 1;
-                    for frame in 0..frames {
-                        let at = pos.saturating_add(frame as i64);
-                        let transport = transport_at(s, at, !live.monitor_only, live.recording);
-                        if let Some(model) = &t.instrument { apply_params(inst, model, t, INSTRUMENT_SLOT, at); }
-                        inst.plugin.set_transport(&transport);
-                        if !live.monitor_only { schedule_notes(s, t, at, 1, inst, &mut strip.held); }
-                        if inst.id == "drum_rack" && strip.pad_effects.enabled {
-                            if let Some(model) = &t.instrument {
-                                strip.pad_effects.process(inst, model, &transport, &mut strip.instrumentbuf, 1, &mut strip.failures);
-                            }
-                        } else {
-                            for channel in &mut strip.instrumentbuf { channel.fill(0.0); }
-                            inst.plugin.process(&mut strip.instrumentbuf, 1);
-                        }
-                        for (index, channel) in strip.buf.iter_mut().enumerate() {
-                            let sample = strip.instrumentbuf.get(index).and_then(|channel| channel.first()).copied().unwrap_or(0.0);
-                            if let Some(destination) = channel.get_mut(frame) {
-                                *destination = if mono {
-                                    0.5 * (sample + strip.instrumentbuf.get(1).and_then(|channel| channel.first()).copied().unwrap_or(0.0))
-                                } else { sample };
-                            }
-                        }
-                    }
-                } else {
-                    inst.plugin.set_transport(&transport);
-                    if !live.monitor_only {
-                        if std::mem::take(&mut strip.chase) {
-                            chase_controllers(s, t, pos, inst);
-                        }
-                        schedule_notes(s, t, pos, frames, inst, &mut strip.held);
-                    }
-                    if inst.id == "drum_rack" && strip.pad_effects.enabled {
-                        if let Some(model) = &t.instrument {
-                            strip.pad_effects.process(inst, model, &transport, &mut strip.buf, frames, &mut strip.failures);
-                        }
-                    } else if strip.buf.len() >= 2 {
-                        inst.plugin.process(&mut strip.buf, frames);
-                    } else if let Some(c0) = strip.buf.first_mut() {
-                        // Mono MIDI track: render the instrument in stereo and fold.
-                        let mut st = [std::mem::take(c0), std::mem::take(&mut strip.scratch)];
-                        inst.plugin.process(&mut st, frames);
-                        let [a, b] = st;
-                        *c0 = a;
-                        strip.scratch = b;
-                        for (x, y) in c0.iter_mut().zip(strip.scratch.iter()).take(frames) {
-                            *x = 0.5 * (*x + *y);
-                        }
-                    }
-                }
-                if contain_failure(inst, &mut strip.buf, frames) {
-                    strip.failures.record(INSTRUMENT_SLOT);
-                }
-            }
-        }
+
         _ => {}
     }
+    let instrument_at = matches!(t.kind, TrackKind::Instrument | TrackKind::Midi).then(|| t.instrument_insert_slot().unwrap_or(0));
+    if instrument_at.is_none() { strip.input_align.process(&mut strip.buf, frames); }
     let trim = db_to_gain(t.mixer.trim_db) * if t.mixer.phase_invert { -1.0 } else { 1.0 };
     if (trim - 1.0).abs() > f32::EPSILON {
         for c in strip.buf.iter_mut() {
@@ -1328,11 +1466,12 @@ fn process_strip(
     let mut gr = 0.0f32;
     let mut latency = strip.pad_effects.latency.saturating_add(instrument_latency(t, strip));
     for (i, ins) in t.mixer.inserts.iter().enumerate() {
+        if instrument_at == Some(i) { process_instrument(s, t, strip, busses, live, pos, frames); }
         let (Some(ins), Some(Some(slot))) = (ins, strip.plugins.get_mut(i)) else { continue };
         if !ins.active || ins.bypass || slot.failed {
             continue;
         }
-        process_insert(slot, ins, t, i, s, pos, &transport, &mut strip.buf, frames);
+        process_insert(slot, ins, t, i, s, pos, &transport, &mut strip.buf, frames, sidechain_input(s, t, i, busses));
         if contain_failure(slot, &mut strip.buf, frames) {
             strip.failures.record(i);
             continue;
@@ -1342,11 +1481,12 @@ fn process_strip(
             gr = slot.plugin.gain_reduction_db();
         }
     }
+    if instrument_at == Some(t.mixer.inserts.len()) { process_instrument(s, t, strip, busses, live, pos, frames); }
     strip.gr = gr;
     strip.latency = latency.min(MAX_LATENCY);
     let soloed_out = any_solo && !t.mixer.solo && !t.mixer.solo_safe && !strip.solo_audible;
     let vca = t.mixer.vca.and_then(|id| s.tracks.iter().find(|track| track.id.0 == id && track.kind == TrackKind::Vca && !track.inactive));
-    strip.muted = t.mixer.mute || soloed_out || vca.is_some_and(|vca| vca.mixer.mute);
+    strip.muted = (t.mixer.mute && automation_lane(t, &AutoParam::Mute).is_none()) || soloed_out || vca.is_some_and(|vca| vca.mixer.mute && automation_lane(vca, &AutoParam::Mute).is_none());
     if t.mixer.sends.iter().flatten().any(|send| send.pre_fader) {
         copy_audio(&strip.buf, &mut strip.pre, frames);
     }
@@ -1484,7 +1624,10 @@ impl ClipFx {
 fn structure_fingerprint(s: &Session) -> usize {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
+    for path in &s.outputs { path.name.hash(&mut h); path.first_channel.hash(&mut h); path.format.hash(&mut h); }
+    for (key, value) in &s.edit.values { if key.starts_with("plugin_sidechain.") || key.starts_with("plugin_output.") { key.hash(&mut h); value.to_bits().hash(&mut h); } }
     for t in &s.tracks {
+        t.instrument_slot.hash(&mut h);
         t.id.hash(&mut h);
         t.kind.hash(&mut h);
         t.format.hash(&mut h);
@@ -1591,6 +1734,7 @@ fn strip_channels(t: &Track, session: &Session, main_ch: usize) -> usize {
     match t.kind {
         TrackKind::Master => match &t.mixer.output {
             Route::Bus(bus) => session.bus(*bus).map_or(main_ch, |bus| bus.format.channels().clamp(1, MAX_CHANNELS)),
+            Route::Hardware(name) => session.outputs.iter().find(|path| &path.name == name).map_or(main_ch, |path| path.format.channels().clamp(1, MAX_CHANNELS)),
             _ => main_ch,
         },
         TrackKind::Instrument => t.channels().clamp(2, MAX_CHANNELS),
@@ -1603,9 +1747,40 @@ fn strip_format(t: &Track, n: usize) -> ChannelFormat {
     if t.format.channels().min(MAX_CHANNELS) == n { t.format } else { ChannelFormat::for_channels(n) }
 }
 
+pub fn plugin_sidechain(session: &Session, track: TrackId, slot: usize) -> Option<BusId> {
+    let key = Key::new(format_args!("plugin_sidechain.{}.{slot}", track.0))?;
+    let value = *session.edit.values.get(key.as_str())?;
+    if !value.is_finite() || value < 0.0 || value > 9_007_199_254_740_991.0 || value.fract() != 0.0 { return None; }
+    Some(BusId(value as u64))
+}
+
+pub fn plugin_output(session: &Session, track: TrackId, slot: usize, bus: usize) -> Option<BusId> {
+    let key = Key::new(format_args!("plugin_output.{}.{slot}.{bus}", track.0))?;
+    let value = *session.edit.values.get(key.as_str())?;
+    if !value.is_finite() || value < 0.0 || value > 9_007_199_254_740_991.0 || value.fract() != 0.0 { return None; }
+    Some(BusId(value as u64))
+}
+
+fn deferred_track(session: &Session, track: &Track) -> bool {
+    matches!(track.kind, TrackKind::Aux | TrackKind::Folder) || (0..=soundcraft_model::INSERT_SLOTS).any(|slot| plugin_sidechain(session, track.id, slot).is_some())
+}
+
+fn capture_outputs(slot: &mut PluginSlot, start: usize, frames: usize) {
+    for (index, bus) in slot.outputs.iter_mut().enumerate() {
+        let source = slot.plugin.output_bus(index + 1);
+        for (channel, destination) in bus.iter_mut().enumerate() {
+            for frame in 0..frames {
+                if let Some(destination) = destination.get_mut(start.saturating_add(frame)) {
+                    *destination = source.and_then(|bus| bus.get(channel)).and_then(|channel| channel.get(frame)).copied().filter(|value| value.is_finite()).unwrap_or(0.0);
+                }
+            }
+        }
+    }
+}
+
 fn processing_order(s: &Session) -> Vec<usize> {
-    let is_aux = |t: &Track| !t.inactive && matches!(t.kind, TrackKind::Aux | TrackKind::Folder);
-    let mut order: Vec<usize> = s.tracks.iter().enumerate().filter(|(_, t)| !matches!(t.kind, TrackKind::Aux | TrackKind::Folder)).map(|(i, _)| i).collect();
+    let is_aux = |t: &Track| !t.inactive && deferred_track(s, t);
+    let mut order: Vec<usize> = s.tracks.iter().enumerate().filter(|(_, t)| !deferred_track(s, t)).map(|(i, _)| i).collect();
     let mut producers: HashMap<BusId, Vec<usize>> = HashMap::new();
     for (i, track) in s.tracks.iter().enumerate().filter(|(_, track)| is_aux(track)) {
         for route in std::iter::once(&track.mixer.output).chain(track.mixer.sends.iter().flatten().map(|send| &send.target)) {
@@ -1616,18 +1791,28 @@ fn processing_order(s: &Session) -> Vec<usize> {
                 }
             }
         }
+        for slot in 0..=soundcraft_model::INSERT_SLOTS {
+            for output in 1..16 {
+                if let Some(bus) = plugin_output(s, track.id, slot, output) {
+                    let sources = producers.entry(bus).or_default();
+                    if !sources.contains(&i) { sources.push(i); }
+                }
+            }
+        }
     }
     let mut incoming = vec![0usize; s.tracks.len()];
     let mut outgoing = vec![Vec::new(); s.tracks.len()];
     let mut ready = std::collections::VecDeque::new();
     for (i, track) in s.tracks.iter().enumerate().filter(|(_, track)| is_aux(track)) {
-        if let Route::Bus(bus) = &track.mixer.input
-            && let Some(feeders) = producers.get(bus)
-        {
-            incoming[i] = feeders.len();
-            for &feeder in feeders {
-                if let Some(edges) = outgoing.get_mut(feeder) {
-                    edges.push(i);
+        let mut inputs: Vec<BusId> = (0..=soundcraft_model::INSERT_SLOTS).filter_map(|slot| plugin_sidechain(s, track.id, slot)).collect();
+        if let Route::Bus(bus) = &track.mixer.input { inputs.push(*bus); }
+        inputs.sort(); inputs.dedup();
+        for bus in inputs {
+            if let Some(feeders) = producers.get(&bus) {
+                for &feeder in feeders {
+                    if let Some(edges) = outgoing.get_mut(feeder) {
+                        if !edges.contains(&i) { edges.push(i); incoming[i] += 1; }
+                    }
                 }
             }
         }
@@ -1655,8 +1840,14 @@ pub fn routing_diagnostics(session: &Session) -> Vec<(TrackId, &'static str)> {
     let order = processing_order(session);
     let mut issues = Vec::new();
     for (index, track) in session.tracks.iter().enumerate().filter(|(_, track)| !track.inactive) {
-        if matches!(track.kind, TrackKind::Aux | TrackKind::Folder) && !order.contains(&index) {
+        if deferred_track(session, track) && !order.contains(&index) {
             issues.push((track.id, "routing cycle or dependency on a routing cycle"));
+        }
+        if matches!(&track.mixer.output, Route::Hardware(name) if !session.outputs.iter().any(|path| &path.name == name)) {
+            issues.push((track.id, "output path is unavailable"));
+        }
+        for slot in 0..=soundcraft_model::INSERT_SLOTS {
+            if plugin_sidechain(session, track.id, slot).is_some_and(|bus| session.bus(bus).is_none()) || (1..16).any(|output| plugin_output(session, track.id, slot, output).is_some_and(|bus| session.bus(bus).is_none())) { issues.push((track.id, "plugin route references a missing bus")); break; }
         }
         if std::iter::once(&track.mixer.input).chain(std::iter::once(&track.mixer.output))
             .chain(track.mixer.sends.iter().flatten().map(|send| &send.target))
@@ -1672,10 +1863,13 @@ fn solo_audibility(session: &Session) -> std::collections::HashSet<TrackId> {
     let tracks = &session.tracks;
     let mut edges = vec![Vec::new(); tracks.len()];
     let mut reverse = vec![Vec::new(); tracks.len()];
-    for (consumer, track) in tracks.iter().enumerate().filter(|(_, track)| !track.inactive && matches!(track.kind, TrackKind::Aux | TrackKind::Folder)) {
-        let Route::Bus(bus) = &track.mixer.input else { continue };
+    for (consumer, track) in tracks.iter().enumerate().filter(|(_, track)| !track.inactive && deferred_track(session, track)) {
+        let mut inputs: Vec<BusId> = (0..=soundcraft_model::INSERT_SLOTS).filter_map(|slot| plugin_sidechain(session, track.id, slot)).collect();
+        if let Route::Bus(bus) = &track.mixer.input { inputs.push(*bus); }
         for (producer, source) in tracks.iter().enumerate().filter(|(_, source)| !source.inactive) {
-            if source.mixer.output == Route::Bus(*bus) || source.mixer.sends.iter().flatten().any(|send| send.target == Route::Bus(*bus)) {
+            let feeds = inputs.iter().any(|bus| source.mixer.output == Route::Bus(*bus) || source.mixer.sends.iter().flatten().any(|send| send.target == Route::Bus(*bus))
+                || (0..=soundcraft_model::INSERT_SLOTS).any(|slot| (1..16).any(|output| plugin_output(session, source.id, slot, output) == Some(*bus))));
+            if feeds {
                 if let Some(list) = edges.get_mut(producer) { list.push(consumer); }
                 if let Some(list) = reverse.get_mut(consumer) { list.push(producer); }
             }
@@ -2042,14 +2236,34 @@ fn has_plugin_automation(track: &Track, address: usize) -> bool {
     })) && track.mixer.automation_mode.reads() && track.mixer.automation_mode != soundcraft_model::AutomationMode::Write
 }
 
+fn sidechain_input<'a>(session: &Session, track: &Track, slot: usize, busses: &'a HashMap<BusId, BusBuf>) -> Option<(&'a [Vec<f32>], usize)> {
+    let bus = busses.get(&plugin_sidechain(session, track.id, slot)?)?;
+    let base = if let Route::Bus(input) = &track.mixer.input { busses.get(input).map_or(0, |bus| bus.arrival.saturating_add(bus.master_latency)) } else { 0 };
+    let arrival = (0..=soundcraft_model::INSERT_SLOTS).filter_map(|slot| plugin_sidechain(session, track.id, slot)).filter_map(|id| busses.get(&id)).map(|bus| bus.arrival.saturating_add(bus.master_latency)).max().unwrap_or(0).max(base);
+    Some((&bus.buf, if session.edit.delay_compensation { arrival.saturating_sub(bus.arrival.saturating_add(bus.master_latency)) } else { 0 }))
+}
+
+fn prepare_sidechain(slot: &mut PluginSlot, input: Option<(&[Vec<f32>], usize)>, frames: usize) {
+    let Some((source, delay)) = input else { return };
+    for (channel, destination) in slot.key_audio.iter_mut().enumerate() {
+        let source = source.get(channel.min(source.len().saturating_sub(1)));
+        for (frame, destination) in destination.iter_mut().take(frames).enumerate() { *destination = source.and_then(|channel| channel.get(frame)).copied().unwrap_or(0.0); }
+    }
+    slot.key_delay.set(delay, slot.key_audio.len());
+    slot.key_delay.process(&mut slot.key_audio, frames);
+}
+
 fn process_insert(slot: &mut PluginSlot, insert: &soundcraft_model::Insert, track: &Track, address: usize,
-    session: &Session, pos: Samples, transport: &Transport, audio: &mut [Vec<f32>], frames: usize)
+    session: &Session, pos: Samples, transport: &Transport, audio: &mut [Vec<f32>], frames: usize, sidechain: Option<(&[Vec<f32>], usize)>)
 {
+    prepare_sidechain(slot, sidechain, frames);
     let automated = has_plugin_automation(track, address);
     if !automated {
         apply_params(slot, insert, track, address, pos);
         slot.plugin.set_transport(transport);
+        slot.plugin.set_sidechain(if sidechain.is_some() { slot.key_audio.as_slice() } else { &[] }, 0, frames);
         slot.plugin.process(audio, frames);
+        capture_outputs(slot, 0, frames);
         return;
     }
     for frame in 0..frames {
@@ -2059,7 +2273,9 @@ fn process_insert(slot: &mut PluginSlot, insert: &soundcraft_model::Insert, trac
         for (source, destination) in audio.iter().zip(&mut slot.sample) {
             if let Some(destination) = destination.first_mut() { *destination = source.get(frame).copied().unwrap_or(0.0); }
         }
+        slot.plugin.set_sidechain(if sidechain.is_some() { slot.key_audio.as_slice() } else { &[] }, frame, 1);
         slot.plugin.process(&mut slot.sample, 1);
+        capture_outputs(slot, frame, 1);
         for (source, destination) in slot.sample.iter().zip(audio.iter_mut()) {
             if let Some(destination) = destination.get_mut(frame) { *destination = source.first().copied().unwrap_or(0.0); }
         }
@@ -2155,7 +2371,7 @@ impl<'a> FaderAutomation<'a> {
             vca_mute: vca.and_then(|track| automation_lane(track, &AutoParam::Mute)),
             base: track.mixer.volume_db,
             vca_base: vca.map_or(0.0, |track| track.mixer.volume_db),
-            muted: track.mixer.mute || vca.is_some_and(|track| track.mixer.mute),
+            muted: (track.mixer.mute && automation_lane(track, &AutoParam::Mute).is_none()) || vca.is_some_and(|track| track.mixer.mute && automation_lane(track, &AutoParam::Mute).is_none()),
         }
     }
 
@@ -2763,6 +2979,24 @@ mod tests {
     }
 
     #[test]
+    fn displayed_instrument_order_controls_the_audio_chain() {
+        let mut session = synth_session(-6.0);
+        let reference = render_range(&session, Range::new(0, 12_000), 512);
+        let mut gain = Insert::new("gain");
+        gain.params.insert("gain".into(), -12.0);
+        session.tracks[0].mixer.inserts[0] = Some(gain.clone());
+        session.tracks[0].instrument_slot = Some(1);
+        assert_eq!(render_range(&session, Range::new(0, 12_000), 512), reference);
+        session.tracks[0].mixer.inserts[0] = None;
+        session.tracks[0].mixer.inserts[1] = Some(gain);
+        session.tracks[0].instrument_slot = Some(0);
+        let after = render_range(&session, Range::new(0, 12_000), 512);
+        let energy = |audio: &[Vec<f32>]| audio[0][6_000..].iter().map(|sample| sample * sample).sum::<f32>();
+        let ratio = energy(&after) / energy(&reference);
+        assert!((ratio - soundcraft_dsp::db_to_gain(-24.0)).abs() < 0.01);
+    }
+
+    #[test]
     fn stored_instrument_params_reach_the_plugin() {
         // #152: a saved instrument level of -12 dB must render quieter than -6 dB.
         // RMS over the held part of the note, past any parameter smoothing.
@@ -2802,6 +3036,30 @@ mod tests {
             pl.clips.push(Clip::audio(id, "dc", SourceId(900), 0, 0, frames as i64));
         }
         t
+    }
+
+    #[test]
+    fn named_hardware_outputs_reach_only_their_device_channels() {
+        let (mut session, track) = session_with_dc(0.5, 128);
+        session.outputs.push(soundcraft_model::OutputPath { name: "Cue".into(), first_channel: 2, format: ChannelFormat::Stereo });
+        session.track_mut(track).unwrap().mixer.output = Route::Hardware("Cue".into());
+        let mut mix = MixEngine::new(48_000.0, 128);
+        let mut output = vec![vec![0.0; 128]; 4];
+        mix.render_device(&session, 0, 128, &mut output);
+        assert!(output[..2].iter().flatten().all(|sample| *sample == 0.0));
+        for channel in &output[2..] { assert!((channel[64] - 0.5 * std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6); }
+    }
+
+    #[test]
+    fn mute_lane_can_unmute_a_statically_muted_track() {
+        let (mut session, track) = session_with_dc(0.5, 128);
+        let track = session.track_mut(track).unwrap();
+        track.mixer.mute = true;
+        let mut lane = soundcraft_model::AutomationLane::new(AutoParam::Mute);
+        lane.set_point(0, 0.0);
+        track.automation.push(lane);
+        let output = render_range(&session, Range::new(0, 128), 128);
+        assert!(output[0][64] > 0.3);
     }
 
     #[test]

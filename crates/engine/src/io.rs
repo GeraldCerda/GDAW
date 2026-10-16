@@ -102,7 +102,20 @@ pub(crate) fn persist_processed(before: &Session, staged: &mut Session, sources:
         source.path = path.to_string_lossy().into_owned();
         source.unsaved = false;
     }
-    for (name, session) in [("before", before), ("ready", &*staged)] {
+    let mut durable_before = before.clone();
+    for source in &mut durable_before.sources {
+        let path = if Path::new(&source.path).is_absolute() { PathBuf::from(&source.path) } else { before.folder.as_ref().map_or_else(|| PathBuf::from(&source.path), |folder| folder.join(&source.path)) };
+        if path.is_file() { source.path = path.to_string_lossy().into_owned(); continue; }
+        let Some(audio) = before.pool.get(source.id) else { continue };
+        let options = EncodeOptions { format: FileFormat::Wav, bit_depth: soundcraft_audio_io::BitDepth::Float32, dither: false, bwf: None };
+        let bytes = soundcraft_audio_io::encode(&audio.buffer, &options).map_err(|error| EngineError::Io(error.to_string()))?;
+        let path = transaction.directory.join(format!("original-{}.wav", source.id.0));
+        replace_file(&path.with_extension("part"), &path, &bytes)?;
+        source.path = path.to_string_lossy().into_owned();
+        source.unsaved = false;
+        if let Some(staged) = staged.sources.iter_mut().find(|staged| staged.id == source.id) { staged.path = source.path.clone(); staged.unsaved = false; }
+    }
+    for (name, session) in [("before", &durable_before), ("ready", &*staged)] {
         let mut recovery = session.clone();
         if let Some(folder) = &session.folder {
             for source in &mut recovery.sources {
@@ -1441,7 +1454,9 @@ pub fn add_recording(e: &mut Engine, start: Samples, takes: Vec<(TrackId, PathBu
                 t.active_playlist = t.playlists.len() - 1;
             }
             let cid = s.new_clip_id();
-            crate::edit::place_clip(s, tid, Clip::audio(cid, name, src, offset, start, n));
+            let trim = start.saturating_neg().max(0).min(n);
+            if trim >= n { continue; }
+            crate::edit::place_clip(s, tid, Clip::audio(cid, name, src, offset.saturating_add(trim), start.max(0), n - trim));
             out.push(cid);
         }
     }

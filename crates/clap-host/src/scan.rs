@@ -58,17 +58,18 @@ pub fn is_clap_path(p: &Path) -> bool {
 /// A `.clap` directory is a bundle and is not descended into. The result is sorted and deduplicated.
 pub fn find_bundles(dirs: &[PathBuf]) -> Vec<PathBuf> {
     let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     let mut budget = MAX_ENTRIES;
-    for d in dirs {
-        if is_clap_path(d) && d.exists() {
-            out.push(d.clone());
-        } else {
-            walk(d, 0, &mut out, &mut budget);
+    for directory in dirs {
+        let mut found = Vec::new();
+        if is_clap_path(directory) && directory.exists() { found.push(directory.clone()); }
+        else { walk(directory, 0, &mut found, &mut budget); }
+        found.sort();
+        for path in found {
+            if out.len() >= MAX_BUNDLES { return out; }
+            if seen.insert(path.clone()) { out.push(path); }
         }
     }
-    out.sort();
-    out.dedup();
-    out.truncate(MAX_BUNDLES);
     out
 }
 

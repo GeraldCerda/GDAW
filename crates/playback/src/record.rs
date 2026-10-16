@@ -84,7 +84,13 @@ fn finite(x: f32) -> f32 {
     if x.is_finite() { x } else { 0.0 }
 }
 
+pub(crate) fn clock_nanos() -> u64 {
+    static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    EPOCH.get_or_init(Instant::now).elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
 struct Shared {
+    first_capture_clock: AtomicU64,
     armed: AtomicBool,
     capturing: AtomicBool,
     epoch: AtomicUsize,
@@ -104,6 +110,7 @@ impl Shared {
     fn new(ring: CaptureRing) -> Shared {
         let (beats, fault, failed) = (AtomicU64::new(0), AtomicU8::new(0), Mutex::new(None));
         Shared {
+            first_capture_clock: AtomicU64::new(0),
             armed: AtomicBool::new(false), capturing: AtomicBool::new(false), epoch: AtomicUsize::new(0),
             pending_silence: AtomicUsize::new(0), ring, dropped: AtomicUsize::new(0), beats, fault, failed,
         }
@@ -173,6 +180,8 @@ where
     let mon = Arc::clone(monitor);
     let levels = Arc::clone(peaks);
     let channels = usize::from(config.channels).max(1);
+    let sample_rate = config.sample_rate.0;
+    let _ = clock_nanos();
     let mut block_peaks = vec![0.0f32; channels];
     let mut scratch = vec![0.0f32; 8192 * usize::from(config.channels).max(1)];
     let chunk = scratch.len();
@@ -180,10 +189,13 @@ where
     let mut epoch = 0;
     device.build_input_stream(
         config,
-        move |data: &[T], _: &cpal::InputCallbackInfo| {
+        move |data: &[T], info: &cpal::InputCallbackInfo| {
             crate::mark_audio_thread();
+            let timestamp = info.timestamp();
+            let age = timestamp.callback.duration_since(&timestamp.capture).map_or(0, |duration| duration.as_nanos().min(u128::from(u64::MAX)) as u64);
+            let captured_at = clock_nanos().saturating_sub(age);
             sh.guarded(|| {
-                for part in data.chunks(chunk) {
+                for (part_index, part) in data.chunks(chunk).enumerate() {
                     let Some(s) = scratch.get_mut(..part.len()) else { return };
                     block_peaks.fill(0.0);
                     for (index, (o, x)) in s.iter_mut().zip(part).enumerate() {
@@ -204,6 +216,9 @@ where
                             owed = 0;
                             epoch = current;
                         }
+                        let offset = (part_index.saturating_mul(chunk) / channels) as u128 * 1_000_000_000 / u128::from(sample_rate.max(1));
+                        let first = captured_at.saturating_add(offset.min(u128::from(u64::MAX)) as u64).max(1);
+                        let _ = sh.first_capture_clock.compare_exchange(0, first, Ordering::Release, Ordering::Relaxed);
                         sh.capture(s, &mut owed);
                     } else {
                         owed = 0;
@@ -311,6 +326,7 @@ impl Recorder {
         ring.tail.store(ring.head.load(Ordering::Acquire), Ordering::Release);
         *self.shared.failed.lock().unwrap_or_else(PoisonError::into_inner) = None;
         self.shared.pending_silence.store(0, Ordering::Release);
+        self.shared.first_capture_clock.store(0, Ordering::Release);
         self.shared.epoch.fetch_add(1, Ordering::Release);
         self.shared.armed.store(true, Ordering::SeqCst);
         let (shared, channels) = (Arc::clone(&self.shared), self.channels);
@@ -322,6 +338,11 @@ impl Recorder {
             }
         }
         Ok(())
+    }
+
+    pub fn first_capture_clock(&self) -> Option<u64> {
+        let value = self.shared.first_capture_clock.load(Ordering::Acquire);
+        (value != 0).then_some(value)
     }
 
     /// What the take recording onto `track` holds so far.

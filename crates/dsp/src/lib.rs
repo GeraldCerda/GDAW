@@ -201,6 +201,11 @@ pub trait Plugin: Send {
     fn param(&self, id: &str) -> Option<f32>;
     /// In-place processing of `channels` planar buffers each `frames` long.
     fn process(&mut self, io: &mut [Vec<f32>], frames: usize);
+    fn flush_parameters(&mut self) {}
+    fn set_sidechain(&mut self, _input: &[Vec<f32>], _start: usize, _frames: usize) -> bool { false }
+    fn has_sidechain(&self) -> bool { false }
+    fn output_bus_count(&self) -> usize { 1 }
+    fn output_bus(&self, _index: usize) -> Option<&[Vec<f32>]> { None }
     /// Processing latency in samples (for delay compensation).
     fn latency(&self) -> usize {
         0
@@ -284,6 +289,7 @@ pub trait PluginEditor: Send {
     /// Tells the editor that a parameter changed elsewhere (generic editor, automation), so the
     /// GUI shows it. Values are in SoundCraft units.
     fn set_param(&mut self, _id: &str, _value: f32) {}
+    fn take_gestures(&mut self) -> Vec<(String, bool)> { Vec::new() }
 }
 
 /// Reads a plugin's state on the main (UI) thread while the instance processes on the audio

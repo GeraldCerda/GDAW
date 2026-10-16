@@ -12,6 +12,11 @@ pub enum BrowserItem {
     Preset(String, String),
 }
 
+pub struct PluginScanUpdate {
+    format: PluginFormat,
+    plugins: Vec<BrowserPlugin>,
+}
+
 pub struct BrowserState {
     pub query: String,
     pub category: String,
@@ -19,7 +24,9 @@ pub struct BrowserState {
     pub format: PluginFormat,
     pub plugins: Vec<BrowserPlugin>,
     pub plugins_loaded: bool,
-    pub plugin_scan: Option<std::sync::mpsc::Receiver<Vec<BrowserPlugin>>>,
+    pub plugin_scan: Option<std::sync::mpsc::Receiver<PluginScanUpdate>>,
+    pub pending_formats: usize,
+    pub startup_scan: bool,
     pub folder: PathBuf,
     pub library_loaded: String,
     pub library_files: Vec<PathBuf>,
@@ -39,6 +46,8 @@ impl Default for BrowserState {
             plugins: crate::plugin_browser::built_in_catalog(),
             plugins_loaded: false,
             plugin_scan: None,
+            pending_formats: 0,
+            startup_scan: false,
             folder: PathBuf::new(),
             library_loaded: String::new(),
             library_files: Vec::new(),
@@ -51,36 +60,96 @@ impl Default for BrowserState {
 }
 
 fn scan_plugins(app: &mut SoundApp, rescan: bool) {
-    app.browser.plugins_loaded = true;
+    crate::plugin_scan::begin(rescan);
+    app.browser.pending_formats = 0;
     #[cfg(not(target_arch = "wasm32"))]
     {
         let (tx, rx) = std::sync::mpsc::channel();
-        match std::thread::Builder::new().name("plugin browser scan".into()).spawn(move || {
-            let _ = tx.send(crate::plugin_browser::catalog(rescan));
-        }) {
-            Ok(_) => app.browser.plugin_scan = Some(rx),
-            Err(error) => app.ui.status = format!("Cannot scan plugins: {error}"),
+        for format in [PluginFormat::Au, PluginFormat::Vst3, PluginFormat::Clap] {
+            let sender = tx.clone();
+            match std::thread::Builder::new().name(format!("{} plugin scan", format.label())).spawn(move || {
+                let plugins = crate::plugin_browser::catalog_format(format, rescan);
+                let _ = sender.send(PluginScanUpdate { format, plugins });
+            }) {
+                Ok(_) => app.browser.pending_formats += 1,
+                Err(error) => app.ui.status = format!("Cannot scan {} plugins: {error}", format.label()),
+            }
         }
+        drop(tx);
+        app.browser.plugins_loaded = app.browser.pending_formats > 0;
+        app.browser.plugin_scan = (app.browser.pending_formats > 0).then_some(rx);
     }
     #[cfg(target_arch = "wasm32")]
     {
         app.browser.plugins = crate::plugin_browser::catalog(rescan);
+        app.browser.plugins_loaded = true;
     }
 }
 
 fn poll_plugins(app: &mut SoundApp) {
-    let result = app.browser.plugin_scan.as_ref().map(|scan| scan.try_recv());
-    match result {
-        Some(Ok(plugins)) => {
-            app.browser.plugins = plugins;
-            app.browser.plugin_scan = None;
+    loop {
+        let result = app.browser.plugin_scan.as_ref().map(|scan| scan.try_recv());
+        match result {
+            Some(Ok(update)) => {
+                app.browser.plugins.retain(|plugin| plugin.format != update.format);
+                app.browser.plugins.extend(update.plugins);
+                crate::plugin_browser::normalize(&mut app.browser.plugins);
+                app.browser.pending_formats = app.browser.pending_formats.saturating_sub(1);
+                if app.browser.pending_formats == 0 {
+                    app.browser.plugin_scan = None;
+                    app.browser.startup_scan = false;
+                    let failures = crate::plugin_scan::progress().failures.len();
+                    app.ui.status = format!("Plugin scan complete: {} installed, {failures} failed", app.browser.plugins.iter().filter(|plugin| plugin.format != PluginFormat::BuiltIn).count());
+                    if let Some(path) = crate::plugin_scan::cache_dir().map(|path| path.join("catalog.json")) {
+                        if let Some(parent) = path.parent() {
+                            if std::fs::create_dir_all(parent).is_ok() {
+                                if let Ok(bytes) = serde_json::to_vec(&app.browser.plugins) { let _ = std::fs::write(path, bytes); }
+                            }
+                        }
+                    }
+                }
+            }
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                app.browser.plugin_scan = None;
+                app.browser.startup_scan = false;
+                app.browser.plugins_loaded = false;
+                app.ui.status = "Plugin scan stopped. Use Rescan installed plugins to retry.".into();
+                break;
+            }
+            _ => break,
         }
-        Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
-            app.browser.plugin_scan = None;
-            app.ui.status = "Plugin scan stopped. Use Rescan installed plugins to retry.".into();
-        }
-        _ => {}
     }
+}
+
+pub fn begin_startup_scan(app: &mut SoundApp) {
+    if let Some(path) = crate::plugin_scan::cache_dir().map(|path| path.join("catalog.json")) {
+        if let Ok(metadata) = std::fs::metadata(&path) {
+            if metadata.len() <= 4_194_304 {
+                if let Ok(bytes) = std::fs::read(path) {
+                    if let Ok(plugins) = serde_json::from_slice::<Vec<BrowserPlugin>>(&bytes) { app.browser.plugins = plugins; }
+                }
+            }
+        }
+    }
+    app.browser.startup_scan = true;
+    scan_plugins(app, false);
+    if app.browser.plugin_scan.is_none() { app.browser.startup_scan = false; }
+}
+
+pub fn startup(app: &mut SoundApp, ui: &mut Ui) -> bool {
+    if !app.browser.startup_scan { return false; }
+    ui.vertical_centered(|ui| {
+        ui.add_space(60.0);
+        ui.heading("G");
+        ui.label("Discovering installed plugins");
+        ui.spinner();
+        let progress = crate::plugin_scan::progress();
+        ui.label(format!("{} bundles checked · {} formats remaining", progress.completed, app.browser.pending_formats));
+        for path in progress.current.values() { ui.label(path); }
+        if ui.button("Continue while scanning").clicked() { app.browser.startup_scan = false; }
+    });
+    ui.ctx().request_repaint_after_secs(0.05);
+    true
 }
 
 pub(crate) fn prepare_plugins(app: &mut SoundApp) {
@@ -140,6 +209,9 @@ pub fn insert_item(app: &mut SoundApp, track: TrackId, item: &BrowserItem) {
         }
     };
     app.ui.show_devices = true;
+    if let Ok(value) = &result {
+        if matches!(item, BrowserItem::Plugin(_) | BrowserItem::Preset(_, _)) { app.show_insert_result(value); }
+    }
     app.ui.status = match result {
         Ok(_) => "Device or sample loaded on the selected track".into(),
         Err(error) => error,
@@ -166,7 +238,8 @@ pub fn insert_effect_at(app: &mut SoundApp, track: TrackId, slot: usize, item: &
     if let Some(params) = params {
         command["params"] = params;
     }
-    app.run("mix.insert", command)?;
+    let result = app.run("mix.insert", command)?;
+    app.show_insert_result(&result);
     let _ = app.run("edit.select", json!({"tracks": [track.0]}));
     app.ui.show_devices = true;
     app.ui.status = format!("{} loaded in insert {}", info.name, (b'A' + slot as u8) as char);
@@ -277,6 +350,14 @@ pub fn browser(app: &mut SoundApp, ui: &mut Ui) {
     if app.browser.plugin_scan.is_some() {
         ui.weak("Scanning installed plugins…");
         ui.ctx().request_repaint_after_secs(0.05);
+    }
+    ui.weak("Supported: VST3, Audio Units and CLAP. AAX and VST2 are not hosted.");
+    let progress = crate::plugin_scan::progress();
+    for path in progress.current.values() { ui.small(format!("Scanning {path}")); }
+    if !progress.failures.is_empty() {
+        egui::CollapsingHeader::new(format!("{} plugins could not be scanned", progress.failures.len())).show(ui, |ui| {
+            for (path, error) in &progress.failures { ui.label(format!("{path}: {error}")); }
+        });
     }
     let instruments = match category.as_str() {
         "Instruments" => Some(true),

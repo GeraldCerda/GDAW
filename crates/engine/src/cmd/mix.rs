@@ -98,6 +98,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("mix.insert_remove", "Remove Insert", [], None, "{track?, slot}", has_selection, insert_remove),
         cmd!("mix.insert_bypass", "Bypass Insert", [], None, "{track?, slot, value?: bool}", has_selection, insert_bypass),
         cmd!("mix.insert_param", "Set Plugin Parameter", [], None, "{track?, slot, param, value}", has_selection, insert_param),
+        cmd!("mix.plugin_routing", "Plugin Routing", [], None, "{track?, slot, sidechain?: bus id|null, output?: 1..15, target?: bus id|null}", has_selection, plugin_routing),
         cmd!(
             "mix.insert_params",
             "Set Plugin Parameters",
@@ -294,6 +295,31 @@ fn track_slot(e: &Engine, p: &Value, cmd: &str, max: usize) -> Result<(TrackId, 
     let t = tracks_required(e, cmd, p)?.first().copied().ok_or_else(|| bad(cmd, "no track"))?;
     let slot = slot_of(p, "slot", max).ok_or_else(|| bad(cmd, format!("`slot` must be 0..{} or a..{}", max - 1, (b'a' + max as u8 - 1) as char)))?;
     Ok((t, slot))
+}
+
+fn plugin_routing(e: &mut Engine, p: &Value) -> Result<Value> {
+    let (track, slot) = track_slot(e, p, "mix.plugin_routing", INSERT_SLOTS + 1)?;
+    let model = e.session().track(track).ok_or_else(|| bad("mix.plugin_routing", "no track"))?;
+    let insert = if model.instrument_insert_slot() == Some(slot) { model.instrument.as_ref() } else { model.mixer.inserts.get(slot).and_then(Option::as_ref) };
+    if insert.is_none() { return Err(bad("mix.plugin_routing", "empty insert slot")); }
+    if p.get("sidechain").is_some() && model.kind == soundcraft_model::TrackKind::Master { return Err(bad("mix.plugin_routing", "Route a sidechain processor through an Aux track")); }
+    for field in ["sidechain", "target"] {
+        if let Some(value) = p.get(field).filter(|value| !value.is_null()) {
+            let id = value.as_u64().filter(|id| *id <= 9_007_199_254_740_991).ok_or_else(|| bad("mix.plugin_routing", "bus must be an id or null"))?;
+            if e.session().bus(soundcraft_model::BusId(id)).is_none() { return Err(bad("mix.plugin_routing", "bus does not exist")); }
+        }
+    }
+    let output = p.get("output").map(|output| output.as_u64().filter(|output| (1..16).contains(output)).ok_or_else(|| bad("mix.plugin_routing", "additional output must be 1..15"))).transpose()?;
+    let session = e.session_mut();
+    if let Some(value) = p.get("sidechain") {
+        let key = format!("plugin_sidechain.{}.{slot}", track.0);
+        if let Some(bus) = value.as_u64() { session.edit.values.insert(key, bus as f64); } else { session.edit.values.remove(&key); }
+    }
+    if let Some(output) = output {
+        let key = format!("plugin_output.{}.{slot}.{output}", track.0);
+        if let Some(bus) = p.get("target").and_then(Value::as_u64) { session.edit.values.insert(key, bus as f64); } else { session.edit.values.remove(&key); }
+    }
+    Ok(json!({"track": track.0, "slot": slot}))
 }
 
 fn insert(e: &mut Engine, p: &Value) -> Result<Value> {

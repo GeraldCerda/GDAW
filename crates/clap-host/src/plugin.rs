@@ -103,6 +103,27 @@ fn note_mode(p: Option<NotePort>) -> NoteMode {
 }
 
 impl Plugin for ClapPlugin {
+    fn flush_parameters(&mut self) {
+        self.inst.flush_parameters(&self.queue);
+        self.queue.retain(|event| !matches!(event, Event::Param { .. }));
+    }
+    fn has_sidechain(&self) -> bool { self.inputs.bus_count() > 1 }
+    fn set_sidechain(&mut self, input: &[Vec<f32>], start: usize, frames: usize) -> bool {
+        if self.inputs.bus_count() < 2 { return false; }
+        let Some(bus) = (0..self.inputs.bus_count()).find(|index| Some(*index) != self.in_main) else { return false };
+        for channel in 0..self.inputs.channels(bus) {
+            let source = input.get(channel.min(input.len().saturating_sub(1)));
+            if let Some(destination) = self.inputs.channel_mut(bus, channel) {
+                for (index, value) in destination.iter_mut().take(frames).enumerate() { *value = source.and_then(|source| source.get(start.saturating_add(index))).copied().unwrap_or(0.0); }
+            }
+        }
+        true
+    }
+    fn output_bus_count(&self) -> usize { self.outputs.bus_count() }
+    fn output_bus(&self, index: usize) -> Option<&[Vec<f32>]> {
+        let port = if index == 0 { self.out_main? } else { (0..self.outputs.bus_count()).filter(|port| Some(*port) != self.out_main).nth(index - 1)? };
+        self.outputs.bus(port)
+    }
     fn info(&self) -> &'static PluginInfo {
         self.info
     }
@@ -213,7 +234,7 @@ impl Plugin for ClapPlugin {
                         }
                     }
                 }
-                (Err(e), _) => log::debug!("{}: {e}", self.info.id),
+                (Err(e), _) => { self.outputs.silence(); log::debug!("{}: {e}", self.info.id); }
                 _ => {}
             }
             start += n;
@@ -311,6 +332,15 @@ struct ClapEditor {
 }
 
 impl PluginEditor for ClapEditor {
+    fn take_gestures(&mut self) -> Vec<(String, bool)> {
+        let mut gestures = Vec::new();
+        for _ in 0..256 {
+            let Ok((id, begin)) = self.link.host().gestures.pop() else { break };
+            if let Some(parameter) = self.ids.iter().position(|candidate| *candidate == id).and_then(|index| self.info.params.get(index)) { gestures.push((parameter.id.to_string(), begin)); }
+        }
+        if self.link.host().gesture_overflow.swap(false, Ordering::AcqRel) { gestures.extend(self.info.params.iter().map(|parameter| (parameter.id.to_string(), false))); }
+        gestures
+    }
     fn open(&mut self) -> Result<(), String> {
         // Edits reported before the editor opened are stale.
         let _ = self.link.idle();

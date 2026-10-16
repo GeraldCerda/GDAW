@@ -3585,7 +3585,11 @@ dependencies = [
 name = "soundcraft-au-host"
 version = "0.6.1"
 dependencies = [
+ "concurrent-queue",
  "log",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "serde",
  "soundcraft-dsp",
  "thiserror 2.0.21",
@@ -3618,6 +3622,7 @@ name = "soundcraft-clap-host"
 version = "0.6.1"
 dependencies = [
  "clap-sys",
+ "concurrent-queue",
  "libloading",
  "log",
  "serde",
@@ -3776,6 +3781,7 @@ dependencies = [
 name = "soundcraft-vst3-host"
 version = "0.6.1"
 dependencies = [
+ "concurrent-queue",
  "libloading",
  "log",
  "objc2 0.6.5",

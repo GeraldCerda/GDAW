@@ -252,6 +252,7 @@ fn io_setup(e: &mut Engine, p: &Value) -> Result<Value> {
         "delete_bus" => {
             let bid: BusId = s.bus_by_name(&name).map(|b| b.id).ok_or_else(|| bad(id, format!("no bus `{name}`")))?;
             s.busses.retain(|b| b.id != bid);
+            s.edit.values.retain(|key, value| !(key.starts_with("plugin_sidechain.") || key.starts_with("plugin_output.")) || *value != bid.0 as f64);
             for t in &mut s.tracks {
                 if t.mixer.input == Route::Bus(bid) {
                     t.mixer.input = Route::None;

@@ -607,7 +607,9 @@ pub(crate) struct HostContext {
     pub latency_changed: AtomicBool,
     pub restart_requested: AtomicBool,
     /// `performEdit` values (normalized), bounded by `EDIT_CAP`.
-    pub edits: Mutex<Vec<(u32, f64)>>,
+    pub edits: concurrent_queue::ConcurrentQueue<(u32, f64)>,
+    pub gestures: concurrent_queue::ConcurrentQueue<(u32, bool)>,
+    pub gesture_overflow: AtomicBool,
 }
 
 impl Default for HostContext {
@@ -615,7 +617,9 @@ impl Default for HostContext {
         HostContext {
             latency_changed: AtomicBool::new(false),
             restart_requested: AtomicBool::new(false),
-            edits: Mutex::new(Vec::with_capacity(EDIT_CAP)),
+            edits: concurrent_queue::ConcurrentQueue::bounded(EDIT_CAP),
+            gestures: concurrent_queue::ConcurrentQueue::bounded(EDIT_CAP),
+            gesture_overflow: AtomicBool::new(false),
         }
     }
 }
@@ -623,9 +627,8 @@ impl Default for HostContext {
 impl HostContext {
     /// Takes the queued editor edits.
     pub fn take_edits(&self) -> Vec<(u32, f64)> {
-        let mut e = self.edits.lock().unwrap_or_else(PoisonError::into_inner);
-        let out = e.clone();
-        e.clear();
+        let mut out = Vec::new();
+        for _ in 0..EDIT_CAP { let Ok(edit) = self.edits.pop() else { break }; out.push(edit); }
         out
     }
 }
@@ -657,22 +660,18 @@ impl IHostApplicationTrait for HostContext {
 }
 
 impl IComponentHandlerTrait for HostContext {
-    unsafe fn beginEdit(&self, _id: sv::ParamID) -> sb::tresult {
+    unsafe fn beginEdit(&self, id: sv::ParamID) -> sb::tresult {
+        if self.gestures.push((id, true)).is_err() { self.gesture_overflow.store(true, Ordering::Release); }
         sb::kResultOk
     }
     unsafe fn performEdit(&self, id: sv::ParamID, value: sv::ParamValue) -> sb::tresult {
         if value.is_finite() {
-            let mut e = self.edits.lock().unwrap_or_else(PoisonError::into_inner);
-            let v = value.clamp(0.0, 1.0);
-            if let Some(x) = e.iter_mut().find(|(i, _)| *i == id) {
-                x.1 = v;
-            } else if e.len() < EDIT_CAP {
-                e.push((id, v));
-            }
+            let _ = self.edits.push((id, value.clamp(0.0, 1.0)));
         }
         sb::kResultOk
     }
-    unsafe fn endEdit(&self, _id: sv::ParamID) -> sb::tresult {
+    unsafe fn endEdit(&self, id: sv::ParamID) -> sb::tresult {
+        if self.gestures.push((id, false)).is_err() { self.gesture_overflow.store(true, Ordering::Release); }
         sb::kResultOk
     }
     unsafe fn restartComponent(&self, flags: sb::int32) -> sb::tresult {
@@ -1018,6 +1017,9 @@ pub(crate) struct BusBuffers {
 unsafe impl Send for BusBuffers {}
 
 impl BusBuffers {
+    pub fn silence(&mut self) { for bus in &mut self.data { for channel in bus { channel.fill(0.0); } } }
+    pub fn bus_count(&self) -> usize { self.data.len() }
+    pub fn bus(&self, index: usize) -> Option<&[Vec<f32>]> { self.data.get(index).map(Vec::as_slice) }
     /// One buffer set per bus, `channels[b]` channels each (capped), `frames` long.
     pub fn new(channels: &[u32], frames: usize) -> BusBuffers {
         let data: Vec<Vec<Vec<f32>>> =
@@ -1362,11 +1364,10 @@ impl Instance {
             outputs: (0..nout).map(|i| self.bus_channels(dout, i)).collect(),
             event_input: self.bus_count(event, din) > 0,
         };
-        // Main buses on, aux buses off (VST3 still gets buffers for every bus).
         for (dir, n) in [(din, nin), (dout, nout)] {
             for i in 0..n {
                 // SAFETY: valid component; index below the bus count.
-                unsafe { self.component.activateBus(audio as sv::MediaType, dir as sv::BusDirection, i, u8::from(i == 0)) };
+                unsafe { self.component.activateBus(audio as sv::MediaType, dir as sv::BusDirection, i, 1) };
             }
         }
         if layout.event_input {

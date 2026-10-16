@@ -14,7 +14,7 @@ use crate::{ClapError, scan};
 use clap_sys::audio_buffer::clap_audio_buffer;
 use clap_sys::entry::clap_plugin_entry;
 use clap_sys::events::{
-    CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_MIDI, CLAP_EVENT_NOTE_OFF, CLAP_EVENT_NOTE_ON, CLAP_EVENT_PARAM_VALUE, CLAP_EVENT_TRANSPORT,
+    CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_GESTURE_BEGIN, CLAP_EVENT_PARAM_GESTURE_END, clap_event_param_gesture, CLAP_EVENT_MIDI, CLAP_EVENT_NOTE_OFF, CLAP_EVENT_NOTE_ON, CLAP_EVENT_PARAM_VALUE, CLAP_EVENT_TRANSPORT,
     CLAP_TRANSPORT_HAS_BEATS_TIMELINE, CLAP_TRANSPORT_HAS_SECONDS_TIMELINE, CLAP_TRANSPORT_HAS_TEMPO, CLAP_TRANSPORT_HAS_TIME_SIGNATURE,
     CLAP_TRANSPORT_IS_PLAYING, CLAP_TRANSPORT_IS_RECORDING, clap_event_header, clap_event_midi, clap_event_note, clap_event_param_value,
     clap_event_transport, clap_input_events, clap_output_events,
@@ -317,8 +317,9 @@ pub(crate) struct HostState {
     /// A size an embedded editor asked for (`width << 32 | height`; 0 = none pending).
     pub gui_resize: AtomicU64,
     /// Parameter changes the plugin reported (output events: typically edits in its GUI),
-    /// waiting for the UI. Bounded by `EDIT_CAP`; the audio thread only `try_lock`s it.
-    pub edits: Mutex<Vec<(u32, f64)>>,
+    pub edits: concurrent_queue::ConcurrentQueue<(u32, f64)>,
+    pub gestures: concurrent_queue::ConcurrentQueue<(u32, bool)>,
+    pub gesture_overflow: AtomicBool,
 }
 
 impl Default for HostState {
@@ -335,7 +336,9 @@ impl Default for HostState {
             gui_show: AtomicBool::new(false),
             gui_hide: AtomicBool::new(false),
             gui_resize: AtomicU64::new(0),
-            edits: Mutex::new(Vec::with_capacity(EDIT_CAP)),
+            edits: concurrent_queue::ConcurrentQueue::bounded(EDIT_CAP),
+            gestures: concurrent_queue::ConcurrentQueue::bounded(EDIT_CAP),
+            gesture_overflow: AtomicBool::new(false),
         }
     }
 }
@@ -646,29 +649,32 @@ unsafe extern "C" fn in_events_get(list: *const clap_input_events, index: u32) -
     v.and_then(|v| v.get(index as usize)).map_or(std::ptr::null(), RawEvent::header)
 }
 
+struct OutputEvents<'a> {
+    values: &'a mut Vec<(u32, f64)>,
+    gestures: &'a concurrent_queue::ConcurrentQueue<(u32, bool)>,
+    overflow: &'a AtomicBool,
+}
+
 unsafe extern "C" fn out_events_try_push(list: *const clap_output_events, event: *const clap_event_header) -> bool {
-    // Plugin → host events are accepted. Parameter values (typically edits in the plugin's GUI)
-    // are kept, while there is room, so the UI can write them into the session; the rest is
-    // ignored.
-    if list.is_null() || event.is_null() {
-        return true;
+    if list.is_null() || event.is_null() { return false; }
+    let header = unsafe { &*event };
+    if header.space_id != CLAP_CORE_EVENT_SPACE_ID { return true; }
+    let Some(output) = (unsafe { ((*list).ctx as *mut OutputEvents<'_>).as_mut() }) else { return false };
+    match header.type_ {
+        CLAP_EVENT_PARAM_VALUE if (header.size as usize) >= size_of::<clap_event_param_value>() => {
+            let value = unsafe { &*event.cast::<clap_event_param_value>() };
+            if !value.value.is_finite() { return false; }
+            if output.values.len() >= output.values.capacity() { return false; }
+            output.values.push((value.param_id, value.value));
+            true
+        }
+        CLAP_EVENT_PARAM_GESTURE_BEGIN | CLAP_EVENT_PARAM_GESTURE_END if (header.size as usize) >= size_of::<clap_event_param_gesture>() => {
+            let gesture = unsafe { &*event.cast::<clap_event_param_gesture>() };
+            if output.gestures.push((gesture.param_id, header.type_ == CLAP_EVENT_PARAM_GESTURE_BEGIN)).is_err() { output.overflow.store(true, Ordering::Release); return false; }
+            true
+        }
+        _ => true,
     }
-    // SAFETY: CLAP passes a valid event header for the duration of the call.
-    let h = unsafe { &*event };
-    if h.space_id != CLAP_CORE_EVENT_SPACE_ID || h.type_ != CLAP_EVENT_PARAM_VALUE || (h.size as usize) < size_of::<clap_event_param_value>() {
-        return true;
-    }
-    // SAFETY: the header says this is a complete `clap_event_param_value` (type and size checked).
-    let e = unsafe { &*event.cast::<clap_event_param_value>() };
-    // SAFETY: `ctx` is null or the instance's preallocated `out_params` Vec, which `process`
-    // borrows exclusively for the duration of the plugin call.
-    if let Some(v) = unsafe { ((*list).ctx as *mut Vec<(u32, f64)>).as_mut() }
-        && v.len() < v.capacity()
-        && e.value.is_finite()
-    {
-        v.push((e.param_id, e.value));
-    }
-    true
 }
 
 // ---- state streams -------------------------------------------------------------------------
@@ -1015,9 +1021,8 @@ impl GuiLink {
             }
         }
         drop(g);
-        let mut e = self.host.edits.lock().unwrap_or_else(PoisonError::into_inner);
-        let out = e.clone();
-        e.clear();
+        let mut out = Vec::new();
+        for _ in 0..EDIT_CAP { let Ok(edit) = self.host.edits.pop() else { break }; out.push(edit); }
         out
     }
 
@@ -1054,6 +1059,9 @@ pub(crate) struct PortBuffers {
 unsafe impl Send for PortBuffers {}
 
 impl PortBuffers {
+    pub fn silence(&mut self) { for bus in &mut self.data { for channel in bus { channel.fill(0.0); } } }
+    pub fn bus_count(&self) -> usize { self.data.len() }
+    pub fn bus(&self, index: usize) -> Option<&[Vec<f32>]> { self.data.get(index).map(Vec::as_slice) }
     /// One buffer set per port, `channels[p]` channels each (capped), `frames` long.
     pub fn new(channels: &[u32], frames: usize) -> PortBuffers {
         let data: Vec<Vec<Vec<f32>>> =
@@ -1331,8 +1339,20 @@ impl Instance {
         }
     }
 
-    /// Runs one `clap_process` call over `frames` frames. Events must be sorted by time; their
-    /// times are made relative to `offset`. Returns the CLAP process status.
+    pub fn flush_parameters(&mut self, events: &[Event]) {
+        if !self.active || (!self.state.process.swap(false, Ordering::AcqRel) && !events.iter().any(|event| matches!(event, Event::Param { .. }))) { return; }
+        let Some(flush) = (unsafe { self.params.as_ref() }).and_then(|params| params.flush) else { return };
+        self.raw.clear();
+        for event in events.iter().filter(|event| matches!(event, Event::Param { .. })).take(self.raw.capacity()) { self.raw.push(RawEvent::from_event(event, event.time())); }
+        let input = clap_input_events { ctx: (&self.raw as *const Vec<RawEvent>).cast_mut().cast(), size: Some(in_events_size), get: Some(in_events_get) };
+        self.out_params.clear();
+        let mut output = OutputEvents { values: &mut self.out_params, gestures: &self.state.gestures, overflow: &self.state.gesture_overflow };
+        let output = clap_output_events { ctx: (&mut output as *mut OutputEvents<'_>).cast(), try_push: Some(out_events_try_push) };
+        unsafe { flush(self.plugin, &input, &output); }
+        for &edit in &self.out_params { let _ = self.state.edits.push(edit); }
+        self.out_params.clear();
+    }
+
     pub fn process(
         &mut self,
         frames: usize,
@@ -1373,8 +1393,8 @@ impl Instance {
             get: Some(in_events_get),
         };
         self.out_params.clear();
-        let out_events =
-            clap_output_events { ctx: (&mut self.out_params as *mut Vec<(u32, f64)>).cast::<c_void>(), try_push: Some(out_events_try_push) };
+        let mut output = OutputEvents { values: &mut self.out_params, gestures: &self.state.gestures, overflow: &self.state.gesture_overflow };
+        let out_events = clap_output_events { ctx: (&mut output as *mut OutputEvents<'_>).cast(), try_push: Some(out_events_try_push) };
         let transport = transport.map(transport_event);
         let p = clap_process {
             steady_time,
@@ -1392,16 +1412,7 @@ impl Instance {
         // lists and their contexts and the transport live on this stack frame / in `self.raw`,
         // untouched until the call returns.
         let status = unsafe { process(self.plugin, &p) };
-        if !self.out_params.is_empty()
-            && let Ok(mut edits) = self.state.edits.try_lock()
-        {
-            // Never blocks or grows: a busy UI or a full queue drops the edits.
-            for &e in &self.out_params {
-                if edits.len() < edits.capacity() {
-                    edits.push(e);
-                }
-            }
-        }
+        for &edit in &self.out_params { let _ = self.state.edits.push(edit); }
         self.out_params.clear();
         if status == CLAP_PROCESS_ERROR { Err(ClapError::Process("plugin reported a processing error".into())) } else { Ok(status) }
     }

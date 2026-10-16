@@ -177,6 +177,19 @@ impl Vst3Plugin {
 }
 
 impl Plugin for Vst3Plugin {
+    fn has_sidechain(&self) -> bool { self.inputs.bus_count() > 1 }
+    fn set_sidechain(&mut self, input: &[Vec<f32>], start: usize, frames: usize) -> bool {
+        if self.inputs.bus_count() < 2 { return false; }
+        for channel in 0..self.inputs.channels(1) {
+            let source = input.get(channel.min(input.len().saturating_sub(1)));
+            if let Some(destination) = self.inputs.channel_mut(1, channel) {
+                for (index, value) in destination.iter_mut().take(frames).enumerate() { *value = source.and_then(|source| source.get(start.saturating_add(index))).copied().unwrap_or(0.0); }
+            }
+        }
+        true
+    }
+    fn output_bus_count(&self) -> usize { self.outputs.bus_count() }
+    fn output_bus(&self, index: usize) -> Option<&[Vec<f32>]> { self.outputs.bus(index) }
     fn info(&self) -> &'static PluginInfo {
         self.info
     }
@@ -309,7 +322,7 @@ impl Plugin for Vst3Plugin {
                         }
                     }
                 }
-                Err(e) => log::debug!("{}: {e}", self.info.id),
+                Err(e) => { self.outputs.silence(); log::debug!("{}: {e}", self.info.id); }
                 _ => {}
             }
             start += n;
@@ -399,7 +412,7 @@ impl Plugin for Vst3Plugin {
 
     fn editor(&mut self) -> Option<Box<dyn PluginEditor>> {
         let link = self.inst.editor()?;
-        Some(Box::new(Vst3Editor { link, host: self.inst.host_ref(), info: self.info, ids: self.ids.clone(), maps: self.maps.clone() }))
+        Some(Box::new(Vst3Editor { link, host: self.inst.host_ref(), info: self.info, ids: self.ids.clone(), maps: self.maps.clone(), unsynced: Arc::clone(&self.unsynced) }))
     }
 
     fn state_reader(&mut self) -> Option<Box<dyn soundcraft_dsp::PluginStateReader>> {
@@ -425,6 +438,7 @@ struct Vst3Editor {
     info: &'static PluginInfo,
     ids: Vec<u32>,
     maps: Vec<Mapping>,
+    unsynced: Arc<[AtomicU64]>,
 }
 
 impl Vst3Editor {
@@ -455,6 +469,15 @@ impl Vst3Editor {
 }
 
 impl PluginEditor for Vst3Editor {
+    fn take_gestures(&mut self) -> Vec<(String, bool)> {
+        let mut result = Vec::new();
+        for _ in 0..256 {
+            let Ok((id, begin)) = self.host.gestures.pop() else { break };
+            if let Some(parameter) = self.ids.iter().position(|candidate| *candidate == id).and_then(|index| self.info.params.get(index)) { result.push((parameter.id.to_string(), begin)); }
+        }
+        if self.host.gesture_overflow.swap(false, Ordering::AcqRel) { result.extend(self.info.params.iter().map(|parameter| (parameter.id.to_string(), false))); }
+        result
+    }
     fn open(&mut self) -> Result<(), String> {
         // Edits reported before the editor opened (e.g. during setup) are stale.
         let _ = self.host.take_edits();
@@ -470,6 +493,10 @@ impl PluginEditor for Vst3Editor {
     }
 
     fn idle(&mut self) -> Vec<(String, f32)> {
+        for (&id, value) in self.ids.iter().zip(self.unsynced.iter()) {
+            let bits = value.swap(SYNCED, Ordering::Relaxed);
+            if bits != SYNCED { self.link.set_normalized(id, f64::from_bits(bits)); }
+        }
         self.link.idle();
         let mut out = Vec::new();
         for (vid, n) in self.host.take_edits() {

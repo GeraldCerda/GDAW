@@ -1,31 +1,40 @@
-GDAW Mac Test Kit v7
+GDAW Mac Test Kit v8 — source candidate
 
 Repository: https://github.com/GeraldCerda/GDAW
-Package revision: read SOURCE_COMMIT beside this file. The source ZIP, kit scripts and app build all use that exact Git commit.
+Exact package revision: SOURCE_COMMIT beside this file.
 
-This kit has no embedded older source pin. Each delivery includes a new source ZIP and matching kit ZIP. SOURCE_COMMIT is package metadata created after the Git commit; it does not modify repository source files. An explicit --revision=<full Git commit> selects the same revision when using GitHub downloads directly.
-
-Extract the kit into ~/Downloads/GDAW_Test_Kit, replacing the kit files and SOURCE_COMMIT. Existing logs, settings and Cargo caches remain available.
+The update ZIP includes the full source at source/GDAW-<SOURCE_COMMIT>, plus the matching build and launch scripts. The source files match that Git revision. It does not reuse an older source pin. The script downloads source only if that exact source directory is missing. Rust and Cargo dependencies may require downloads.
 
 Build, install and launch:
 bash "$HOME/Downloads/GDAW_Test_Kit/build_test.sh"
 
-The normal command runs no regression suites. It downloads the exact revision's source, builds the native Mac application, signs it locally, installs GDAW Test.app into /Applications, reveals it in Finder and launches it. macOS may request your administrator password for installation. Any previous tester in /Applications is preserved as a timestamped backup. The launch script prefers /Applications and retains a fallback to ~/Applications.
+The normal command runs no regression suites. It builds the native Mac application, signs it locally, installs GDAW Test.app into /Applications, reveals it in Finder and launches it. macOS may request your administrator password. A previous tester in /Applications is preserved as a timestamped backup. Existing kit logs, preferences and Cargo caches remain available.
 
-The installed app records its exact source commit in Contents/Info.plist as GDAWBuildCommit. Test settings remain in ~/Library/Application Support/GDAW Test. Build and launch logs remain in this kit's logs directory.
+The installed app records the exact source revision as GDAWBuildCommit in Contents/Info.plist. Preferences use ~/Library/Application Support/GDAW Test. Build and launch logs use this kit's logs directory.
+
+Source changes in this candidate:
+- Startup plugin discovery, concurrent AU/VST3/CLAP enumeration, a startup progress screen, persisted catalog and isolated-scan descriptor/failure caches, explicit scan failures and rescan support.
+- User-first VST3/CLAP search precedence; network and application-bundled VST3 locations on macOS.
+- Automatic editor opening after insertion, AUv2 native Cocoa views and parameter gestures, bounded VST3/CLAP edit and gesture queues, and CLAP parameter flushing while stopped.
+- Instrument processing follows its displayed insert position. Legacy overflow K is visible in Edit and Mix as well as the bottom device chain.
+- Named hardware output mixing and sends, physical Aux/Folder input monitoring, plugin key-input and additional-output routing through internal buses, graph/solo handling, missing-route diagnostics and bus-delete cleanup.
+- Pan/mute/send/plugin Touch and Latch writing, Touch return ramps, native editor gesture forwarding and mute-lane override fixes.
+- Capture/output timestamp anchors for take placement and trimming of captured material before timeline zero.
+- AudioSuite partial-selection fragments, preservation of their editable clip effects, and durable copies of previously memory-only original media in transaction snapshots.
+
+This revision has NOT been compiled, type/borrow checked, linted, linked, installed or launched. No new or existing Rust tests have run. The added test source is unexecuted. Static source review, TOML parsing, shell syntax checking and Git/package byte comparisons do not establish a clean application build.
+
+Still incomplete:
+- End-to-end callback allocation/lock/deadline instrumentation, remaining hosted-plugin lifecycle paths, shutdown ownership and bounded disk streaming.
+- Prepared delay-capacity replenishment and continuity beyond existing capacity; native sample-offset automation delivery instead of the existing one-sample fallback; complete gesture timing and parameter overrides between UI ticks.
+- Continuous timestamp-based device drift correction, loop/seek/varispeed recording alignment, converter-latency calibration, and phase-accurate compensation of additional plugin outputs and all sidechain branches.
+- Master-track sidechains, plugin port layouts beyond the exposed main/first auxiliary input and supported extra outputs, and dynamic port-layout renegotiation.
+- AudioSuite preview, automatic recovery discovery/replay, replacement crossfades, media ownership/garbage collection, and a permanent project location for unsaved-session transaction media. Partial selections that change length require a full clip selection. Missing original media without a pool copy cannot be recovered.
+- AAX, VST2 and asynchronously instantiated AUv3 plugins are unsupported. External MIDI-device recording/routing was not implemented or validated by this update.
+
+Untested behavior includes every new and existing Rust test; real AU/VST3/CLAP discovery, editors, automation and plugin states; Apollo and other physical I/O, recording offsets and drift; callback deadlines and saturation; audible delay transitions, routing null/phase tests and offline parity; AudioSuite failure/crash/reopen/undo behavior; UI rendering/interaction; Mac signing, /Applications installation and launch; Windows/Linux/web builds.
 
 Optional verification is explicit:
 bash "$HOME/Downloads/GDAW_Test_Kit/build_test.sh" --verify
 
---verify runs the DSP, model, engine, mix, playback and UI suites. --verify-ui runs only UI tests. Both options disable link-time optimization for test executables only. The application keeps its normal release link settings. No test suite runs without a verification option.
-
-The last native arm64 desktop build and complete core/UI verification were performed at source revision 964ecaa999ad8feb17bce77c3830005ba1e4b656 with Rust 1.99.1: zero compiler errors or warnings; 819 tests passed, zero failed, zero ignored.
-Build: https://github.com/GeraldCerda/GDAW/actions/runs/38855525806
-Regressions: https://github.com/GeraldCerda/GDAW/actions/runs/38855525758
-
-Subsequent kit changes correct the /Applications destination and bind each package to its own Git revision. These kit changes have not been compiled, installed or launched on a Mac. The older successful CI runs do not establish an installation result for this package.
-
-Architecture work remains incomplete: complete parameter Touch/Latch gestures and native hosted automation events; timestamp-driven capture alignment; remaining callback/plugin lifecycle and streaming work; delay-capacity replenishment; AudioSuite recovery, partial-selection/crossfaded replacement and media ownership; instrument DSP ordering and overflow presentation.
-
-Physical audio, Apollo input/output and recording, device-clock drift, hosted plugins, callback timing, audible delay changes, AudioSuite crash recovery and interactive application use remain unvalidated. Use a disposable session copy.
-Full audit: https://github.com/GeraldCerda/GDAW/blob/main/docs/GDAW_BUILD_FAILURE_AUDIT_2026-10-16.md
+--verify runs DSP/model/engine/mix/playback/UI suites. --verify-ui runs UI suites only. Both disable LTO for test executables only. The application retains its normal release link settings. Neither option runs by default.

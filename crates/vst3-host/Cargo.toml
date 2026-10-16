@@ -12,6 +12,7 @@ soundcraft-dsp.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 log.workspace = true
+concurrent-queue = "2.5"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 vst3 = "0.3"

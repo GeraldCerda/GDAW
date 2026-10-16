@@ -1,6 +1,51 @@
 use serde::de::DeserializeOwned;
 use std::path::{Path, PathBuf};
 
+#[derive(Clone, Default)]
+pub struct ScanProgress {
+    pub completed: usize,
+    pub current: std::collections::BTreeMap<String, String>,
+    pub failures: Vec<(String, String)>,
+}
+
+static FORCE_SCAN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn progress_state() -> &'static std::sync::Mutex<ScanProgress> {
+    static STATE: std::sync::OnceLock<std::sync::Mutex<ScanProgress>> = std::sync::OnceLock::new();
+    STATE.get_or_init(|| std::sync::Mutex::new(ScanProgress::default()))
+}
+
+pub fn progress() -> ScanProgress {
+    progress_state().lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+}
+
+pub fn begin(rescan: bool) {
+    FORCE_SCAN.store(rescan, std::sync::atomic::Ordering::Release);
+    *progress_state().lock().unwrap_or_else(std::sync::PoisonError::into_inner) = ScanProgress::default();
+}
+
+pub fn cache_dir() -> Option<PathBuf> {
+    let root = std::env::var_os("SOUNDCRAFT_CONFIG_DIR").filter(|value| !value.is_empty()).map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(if cfg!(target_os = "macos") { "Library/Application Support/GDAW" } else { ".cache/gdaw" })))?;
+    Some(root.join("PluginCache"))
+}
+
+fn cache_path(path: &Path, format: &str) -> Option<PathBuf> {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hash);
+    format.hash(&mut hash);
+    std::env::consts::ARCH.hash(&mut hash);
+    std::env::consts::OS.hash(&mut hash);
+    for candidate in [Some(path.to_path_buf()), Some(path.join("Contents/Info.plist")), soundcraft_vst3_host::scan::bundle_binary(path), soundcraft_clap_host::scan::bundle_executable(path), std::env::current_exe().ok()] .into_iter().flatten() {
+        if let Ok(metadata) = std::fs::metadata(candidate) {
+            metadata.len().hash(&mut hash);
+            metadata.modified().ok().hash(&mut hash);
+        }
+    }
+    Some(cache_dir()?.join(format!("{:016x}.json", hash.finish())))
+}
+
 pub fn run_helper(args: &[String]) -> Option<i32> {
     let format = args.first()?.as_str();
     if !matches!(format, "--gdaw-scan-vst3" | "--gdaw-scan-clap") {
@@ -54,9 +99,44 @@ fn scan_directory() -> Result<ScanDirectory, String> {
 }
 
 fn isolated<T: DeserializeOwned>(path: &Path, format: &str) -> Result<Vec<T>, String> {
+    {
+        let mut state = progress_state().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.current.insert(format.to_string(), path.display().to_string());
+    }
+    let result: Result<Vec<T>, String> = isolated_inner(path, format);
+    if let Err(error) = &result {
+        if let Some(cache) = cache_path(path, format) {
+            if let Some(parent) = cache.parent() {
+                if std::fs::create_dir_all(parent).is_ok() {
+                    if let Ok(bytes) = serde_json::to_vec(&Result::<Vec<serde_json::Value>, String>::Err(error.clone())) {
+                        let _ = std::fs::write(cache, bytes);
+                    }
+                }
+            }
+        }
+    }
+    let mut state = progress_state().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    state.completed = state.completed.saturating_add(1);
+    state.current.remove(format);
+    if let Err(error) = &result {
+        if state.failures.len() < 4096 { state.failures.push((path.display().to_string(), error.clone())); }
+    }
+    result
+}
+
+fn isolated_inner<T: DeserializeOwned>(path: &Path, format: &str) -> Result<Vec<T>, String> {
     use std::io::Read;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
+    let cache = cache_path(path, format);
+    if !FORCE_SCAN.load(std::sync::atomic::Ordering::Acquire) {
+        if let Some(file) = cache.as_ref().and_then(|path| std::fs::File::open(path).ok()) {
+            let mut bytes = Vec::new();
+            if file.take(4_194_305).read_to_end(&mut bytes).is_ok() && bytes.len() <= 4_194_304 {
+                if let Ok(result) = serde_json::from_slice::<Result<Vec<T>, String>>(&bytes) { return result; }
+            }
+        }
+    }
     let directory = scan_directory()?;
     let output = directory.0.join("descriptor.json");
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
@@ -91,7 +171,16 @@ fn isolated<T: DeserializeOwned>(path: &Path, format: &str) -> Result<Vec<T>, St
     if bytes.len() > 4_194_304 {
         return Err("plugin scan metadata is too large".into());
     }
-    serde_json::from_slice::<Result<Vec<T>, String>>(&bytes).map_err(|error| error.to_string())?
+    let result = serde_json::from_slice::<Result<Vec<T>, String>>(&bytes).map_err(|error| error.to_string())?;
+    if let Some(cache) = cache {
+        if let Some(parent) = cache.parent() {
+            if std::fs::create_dir_all(parent).is_ok() {
+                let staged = cache.with_extension(format!("{}.partial", std::process::id()));
+                if std::fs::write(&staged, &bytes).is_ok() { let _ = std::fs::rename(staged, cache); }
+            }
+        }
+    }
+    result
 }
 
 #[cfg(test)]

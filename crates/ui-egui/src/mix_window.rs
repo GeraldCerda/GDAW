@@ -217,10 +217,11 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
         if !(all || has(key)) {
             continue;
         }
-        let sec = Rect::from_min_size(pos2(x0, y), vec2(inner_w, 16.0 + 5.0 * 17.0));
+        let count = if !is_send && off == 5 && track.instrument_insert_slot() == Some(soundcraft_model::INSERT_SLOTS) { 6 } else { 5 };
+        let sec = Rect::from_min_size(pos2(x0, y), vec2(inner_w, 16.0 + count as f32 * 17.0));
         inset(ui.painter(), sec, t.strip_section);
-        section_label(ui, sec, title);
-        for k in 0..5 {
+        section_label(ui, sec, if count == 6 { "INSERTS F-K" } else { title });
+        for k in 0..count {
             let sr = Rect::from_min_size(pos2(x0 + 2.0, sec.min.y + 15.0 + k as f32 * 17.0), vec2(inner_w - 4.0, 15.0));
             if is_send {
                 send_slot(app, ui, track, off + k, sr);
@@ -675,8 +676,10 @@ fn instrument_menu_at(app: &mut SoundApp, ui: &mut Ui, id: TrackId, visual: usiz
 
 /// Runs a menu's pick, shows its error in the status line and closes the menu.
 fn run_pick(app: &mut SoundApp, ui: &Ui, cmd: &str, params: serde_json::Value) {
-    if let Err(e) = app.run(cmd, params) {
-        app.ui.status = e;
+    match app.run(cmd, params) {
+        Ok(result) if cmd == "mix.insert" => app.show_insert_result(&result),
+        Err(error) => app.ui.status = error,
+        _ => {}
     }
     ui.close();
 }
@@ -696,7 +699,7 @@ fn plugin_search(app: &SoundApp, ui: &mut Ui, search: &MenuSearch, instruments: 
     plugins.sort_by_cached_key(|plugin| (plugin.name.to_lowercase(), plugin.format.label(), plugin.id.clone()));
     let picked = search.rows(ui, plugins.len(), 320.0, |ui, index, highlighted| plugins.get(index).is_some_and(|plugin| menu_row(ui, highlighted, &catalog_label(plugin))));
     if plugins.is_empty() {
-        ui.label("No matches");
+        ui.label(if app.browser.plugin_scan.is_some() { "Installed plugins are still being scanned" } else { "No matches" });
     }
     picked.and_then(|index| plugins.get(index).map(|plugin| plugin.id.clone()))
 }
@@ -1171,6 +1174,16 @@ fn route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, input: bool) {
     if !input && ui.button(main_name).clicked() {
         let _ = app.run(cmd, json!({"track": id.0, key: "main"}));
         ui.close();
+    }
+    if !input {
+        let channels = app.player.as_ref().filter(|player| !player.silent).map(|player| usize::from(player.device_channels));
+        let outputs: Vec<_> = app.engine.session().outputs.iter().skip(1).map(|path| (path.name.clone(), usize::from(path.first_channel).saturating_add(path.format.channels()))).collect();
+        for (output, required) in outputs {
+            if ui.add_enabled(channels.is_none_or(|channels| required <= channels), egui::Button::new(&output)).on_disabled_hover_text("This output is outside the selected audio device's channels").clicked() {
+                let _ = app.run(cmd, json!({"track": id.0, key: output}));
+                ui.close();
+            }
+        }
     }
     if input {
         let channels = crate::windows::hardware_input_channels(app, ui.ctx());

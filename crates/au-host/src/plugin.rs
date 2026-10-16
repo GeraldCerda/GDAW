@@ -2,6 +2,7 @@
 
 use crate::ffi::Instance;
 use soundcraft_dsp::{Plugin, PluginInfo, Transport};
+use std::sync::{Arc, atomic::{AtomicU32, Ordering}};
 
 /// Most MIDI events queued between two blocks (extra events are dropped).
 const EVENT_CAP: usize = 1024;
@@ -25,6 +26,7 @@ pub struct AuPlugin {
     /// Audio Unit id of each `info.params` entry (same order).
     ids: Vec<u32>,
     values: Vec<f32>,
+    host_values: Arc<[AtomicU32]>,
     /// Pending MIDI, kept sorted by time. Never grows past `EVENT_CAP`.
     events: Vec<MidiEvent>,
     held: [bool; 128],
@@ -40,11 +42,12 @@ pub struct AuPlugin {
 impl AuPlugin {
     pub(crate) fn new(inst: Instance, info: &'static PluginInfo, has_input: bool, takes_midi: bool) -> AuPlugin {
         let ids: Vec<u32> = info.params.iter().map(|p| p.id.parse::<u32>().unwrap_or(u32::MAX)).collect();
-        let values = info.params.iter().zip(&ids).map(|(p, &id)| inst.get_param(id).map_or(p.default, |v| p.clamp(v))).collect();
+        let values: Vec<f32> = info.params.iter().zip(&ids).map(|(p, &id)| inst.get_param(id).map_or(p.default, |v| p.clamp(v))).collect();
         AuPlugin {
             inst,
             info,
             ids,
+            host_values: values.iter().map(|value| AtomicU32::new(value.to_bits())).collect(),
             values,
             events: Vec::with_capacity(EVENT_CAP),
             held: [false; 128],
@@ -58,9 +61,10 @@ impl AuPlugin {
 
     /// Re-reads every parameter value from the unit (after a state load).
     fn refresh_values(&mut self) {
-        for ((slot, p), &id) in self.values.iter_mut().zip(self.info.params).zip(&self.ids) {
+        for (((slot, p), &id), host) in self.values.iter_mut().zip(self.info.params).zip(&self.ids).zip(self.host_values.iter()) {
             if let Some(v) = self.inst.get_param(id) {
                 *slot = p.clamp(v);
+                host.store(slot.to_bits(), Ordering::Release);
             }
         }
     }
@@ -77,6 +81,20 @@ impl AuPlugin {
 }
 
 impl Plugin for AuPlugin {
+    fn has_sidechain(&self) -> bool { self.inst.has_sidechain() }
+    fn set_sidechain(&mut self, input: &[Vec<f32>], start: usize, frames: usize) -> bool {
+        if !self.inst.has_sidechain() { return false; }
+        for channel in 0..2 {
+            let source = input.get(channel.min(input.len().saturating_sub(1)));
+            if let Some(destination) = self.inst.sidechain_input_mut(channel) {
+                for (index, value) in destination.iter_mut().take(frames).enumerate() { *value = source.and_then(|source| source.get(start.saturating_add(index))).copied().unwrap_or(0.0); }
+            }
+        }
+        true
+    }
+    fn output_bus_count(&self) -> usize { self.inst.output_bus_count() }
+    fn output_bus(&self, index: usize) -> Option<&[Vec<f32>]> { self.inst.output_bus(index) }
+
     fn info(&self) -> &'static PluginInfo {
         self.info
     }
@@ -114,6 +132,7 @@ impl Plugin for AuPlugin {
         if let Some(slot) = self.values.get_mut(i) {
             *slot = v;
         }
+        if let Some(host) = self.host_values.get(i) { host.store(v.to_bits(), Ordering::Release); }
         self.inst.set_param(aid, v);
         true
     }
@@ -258,5 +277,35 @@ impl Plugin for AuPlugin {
     fn state_reader(&mut self) -> Option<Box<dyn soundcraft_dsp::PluginStateReader>> {
         let link = self.inst.state_link();
         Some(Box::new(move || link.save_state()))
+    }
+
+    fn editor(&mut self) -> Option<Box<dyn soundcraft_dsp::PluginEditor>> {
+        Some(Box::new(AuEditor { link: self.inst.state_link(), info: self.info, ids: self.ids.clone(), values: Arc::clone(&self.host_values) }))
+    }
+}
+
+struct AuEditor {
+    link: std::sync::Arc<crate::ffi::StateLink>,
+    info: &'static PluginInfo,
+    ids: Vec<u32>,
+    values: Arc<[AtomicU32]>,
+}
+
+impl soundcraft_dsp::PluginEditor for AuEditor {
+    fn open(&mut self) -> Result<(), String> { self.link.open_editor(self.info.name)?; self.link.listen_gestures(&self.ids); Ok(()) }
+    fn take_gestures(&mut self) -> Vec<(String, bool)> { self.link.take_gestures(&self.ids).into_iter().map(|(id, begin)| (id.to_string(), begin)).collect() }
+    fn close(&mut self) { self.link.close_editor(); }
+    fn is_open(&self) -> bool { self.link.editor_open() }
+    fn idle(&mut self) -> Vec<(String, f32)> {
+        if !self.is_open() { return Vec::new(); }
+        let mut edits = Vec::new();
+        let expected: Vec<_> = self.values.iter().map(|value| value.load(Ordering::Acquire)).collect();
+        for (((parameter, old), expected), value) in self.info.params.iter().zip(self.values.iter()).zip(expected).zip(self.link.parameter_values(&self.ids)) {
+            if let Some(value) = value {
+                let value = parameter.clamp(value);
+                if expected != value.to_bits() && old.compare_exchange(expected, value.to_bits(), Ordering::AcqRel, Ordering::Acquire).is_ok() { edits.push((parameter.id.to_string(), value)); }
+            }
+        }
+        edits
     }
 }

@@ -344,11 +344,18 @@ unsafe extern "C" {
     ) -> OSStatus;
     fn AudioUnitReset(unit: AudioUnit, scope: u32, element: u32) -> OSStatus;
     fn MusicDeviceMIDIEvent(unit: AudioUnit, status: u32, data1: u32, data2: u32, offset: u32) -> OSStatus;
+    fn AUEventListenerCreate(callback: unsafe extern "C" fn(*mut c_void, *mut c_void, *const AuParameterEvent, u64, f32), context: *mut c_void, run_loop: CFTypeRef, mode: CFTypeRef, interval: f32, granularity: f32, listener: *mut *mut c_void) -> OSStatus;
+    fn AUEventListenerAddEventType(listener: *mut c_void, object: *mut c_void, event: *const AuParameterEvent) -> OSStatus;
+    fn AUListenerDispose(listener: *mut c_void) -> OSStatus;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
     fn CFRelease(cf: CFTypeRef);
+    fn CFBundleCreate(allocator: CFTypeRef, url: CFTypeRef) -> CFTypeRef;
+    fn CFBundleLoadExecutable(bundle: CFTypeRef) -> u8;
+    fn CFRunLoopGetCurrent() -> CFTypeRef;
+    static kCFRunLoopDefaultMode: CFTypeRef;
     fn CFGetTypeID(cf: CFTypeRef) -> usize;
     fn CFStringGetTypeID() -> usize;
     fn CFDictionaryGetTypeID() -> usize;
@@ -459,6 +466,7 @@ pub struct RawParam {
 /// each render.
 struct InputState {
     bufs: Vec<Vec<f32>>,
+    sidechain: Vec<Vec<f32>>,
     frames: usize,
 }
 
@@ -467,7 +475,7 @@ unsafe extern "C" fn input_callback(
     ref_con: *mut c_void,
     _action_flags: *mut u32,
     _time_stamp: *const AudioTimeStamp,
-    _bus: u32,
+    bus: u32,
     frames: u32,
     data: *mut AudioBufferListHeader,
 ) -> OSStatus {
@@ -484,10 +492,11 @@ unsafe extern "C" fn input_callback(
         let first: *mut AudioBuffer = ptr::addr_of_mut!((*data).first);
         let frames = (frames as usize).min(MAX_SLICE);
         let avail = input.frames.min(frames);
+        let buffers = if bus == 0 { &mut input.bufs } else { &mut input.sidechain };
         for i in 0..n.min(64) {
             let b = &mut *first.add(i);
-            let last = input.bufs.len().saturating_sub(1);
-            let Some(src) = input.bufs.get_mut(i.min(last)) else { continue };
+            let last = buffers.len().saturating_sub(1);
+            let Some(src) = buffers.get_mut(i.min(last)) else { continue };
             if b.data.is_null() {
                 // Lend our buffer (the unit may process in place; it is ours to scribble on).
                 if src.len() >= frames {
@@ -515,6 +524,8 @@ pub struct Instance {
     /// Leaked `Box<HostTime>` read by the host callbacks; freed in `Drop` after disposal.
     time: *mut HostTime,
     outputs: Vec<Vec<f32>>,
+    extra_outputs: Vec<(Vec<Vec<f32>>, AudioBufferList)>,
+    sidechain_channels: usize,
     abl: AudioBufferList,
     has_input: bool,
     initialized: bool,
@@ -552,7 +563,7 @@ impl Instance {
         if st != 0 || unit.is_null() {
             return Err(format!("AudioComponentInstanceNew failed ({st})"));
         }
-        let input = Box::into_raw(Box::new(InputState { bufs: Vec::new(), frames: 0 }));
+        let input = Box::into_raw(Box::new(InputState { bufs: Vec::new(), sidechain: Vec::new(), frames: 0 }));
         let time = Box::into_raw(Box::new(HostTime::new()));
         let empty = AudioBuffer { number_channels: 1, data_byte_size: 0, data: ptr::null_mut() };
         let inst = Instance {
@@ -560,9 +571,11 @@ impl Instance {
             input,
             time,
             outputs: Vec::new(),
+            extra_outputs: Vec::new(),
+            sidechain_channels: 0,
             abl: AudioBufferList { number_buffers: 0, buffers: [empty; MAX_AU_CHANNELS] },
             has_input,
-            link: std::sync::Arc::new(StateLink(std::sync::Mutex::new(LinkedUnit(Some(unit))))),
+            link: std::sync::Arc::new(StateLink(std::sync::Mutex::new(LinkedUnit(Some(unit), None, ptr::null_mut())), concurrent_queue::ConcurrentQueue::bounded(1024), AtomicBool::new(false))),
             initialized: false,
             channels: 0,
             max_frames: 0,
@@ -605,7 +618,7 @@ impl Instance {
         (st == 0 && v.is_finite()).then_some(v)
     }
 
-    fn format(&self, scope: u32, sample_rate: f64, channels: usize) -> OSStatus {
+    fn format_on(&self, scope: u32, bus: u32, sample_rate: f64, channels: usize) -> OSStatus {
         let asbd = AudioStreamBasicDescription {
             sample_rate,
             format_id: FORMAT_LINEAR_PCM,
@@ -617,8 +630,21 @@ impl Instance {
             bits_per_channel: 32,
             reserved: 0,
         };
-        self.set_property(PROP_STREAM_FORMAT, scope, 0, &asbd)
+        self.set_property(PROP_STREAM_FORMAT, scope, bus, &asbd)
     }
+
+    fn format(&self, scope: u32, sample_rate: f64, channels: usize) -> OSStatus { self.format_on(scope, 0, sample_rate, channels) }
+
+    fn bus_count(&self, scope: u32) -> usize {
+        let mut count = 0u32;
+        let mut size = 4u32;
+        if unsafe { AudioUnitGetProperty(self.unit, 11, scope, 0, (&mut count as *mut u32).cast(), &mut size) } == 0 { count.min(16) as usize } else { 0 }
+    }
+
+    pub fn has_sidechain(&self) -> bool { self.sidechain_channels > 0 }
+    pub fn sidechain_input_mut(&mut self, channel: usize) -> Option<&mut [f32]> { unsafe { &mut *self.input }.sidechain.get_mut(channel).map(Vec::as_mut_slice) }
+    pub fn output_bus_count(&self) -> usize { self.extra_outputs.len() + 1 }
+    pub fn output_bus(&self, bus: usize) -> Option<&[Vec<f32>]> { if bus == 0 { Some(&self.outputs) } else { self.extra_outputs.get(bus - 1).map(|(buffers, _)| buffers.as_slice()) } }
 
     /// (Re)configures and initializes the unit for `sample_rate`, `max_frames`-frame slices and
     /// (preferably) `channels` channels on its main input and output buses. Returns the channel
@@ -638,6 +664,21 @@ impl Instance {
             if st != 0 {
                 return Err(format!("cannot set the input callback ({st})"));
             }
+        }
+        self.sidechain_channels = 0;
+        if self.bus_count(SCOPE_INPUT) > 1 {
+            for channels in [2usize, 1] {
+                if self.format_on(SCOPE_INPUT, 1, sample_rate, channels) == 0 {
+                    let callback = AuRenderCallbackStruct { input_proc: Some(input_callback), input_proc_ref_con: self.input.cast() };
+                    if self.set_property(PROP_SET_RENDER_CALLBACK, SCOPE_INPUT, 1, &callback) == 0 { self.sidechain_channels = channels; break; }
+                }
+            }
+        }
+        let mut output_layout = Vec::new();
+        for bus in 1..self.bus_count(SCOPE_OUTPUT) {
+            let mut count = 0;
+            for channels in [2usize, 1] { if self.format_on(SCOPE_OUTPUT, bus as u32, sample_rate, channels) == 0 { count = channels; break; } }
+            output_layout.push(count);
         }
         let want = channels.clamp(1, MAX_AU_CHANNELS);
         let mut tried = [0usize; 3];
@@ -670,11 +711,14 @@ impl Instance {
         self.sample_rate = sample_rate;
         self.time().sample_rate.store(sample_rate.to_bits(), Ordering::Relaxed);
         self.outputs = (0..ch).map(|_| vec![0.0; mf]).collect();
+        let empty = AudioBuffer { number_channels: 1, data_byte_size: 0, data: ptr::null_mut() };
+        self.extra_outputs = output_layout.into_iter().map(|channels| (vec![vec![0.0; mf]; channels], AudioBufferList { number_buffers: 0, buffers: [empty; MAX_AU_CHANNELS] })).collect();
         // SAFETY: the callback only runs inside `AudioUnitRender`, which is not running now
         // (we hold `&mut self`), so this exclusive access does not alias.
         let input = unsafe { &mut *self.input };
         input.bufs = if self.has_input { (0..ch).map(|_| vec![0.0; mf]).collect() } else { Vec::new() };
         input.frames = 0;
+        input.sidechain = vec![vec![0.0; mf]; self.sidechain_channels];
         self.max_frames = mf;
         Ok(ch)
     }
@@ -714,6 +758,21 @@ impl Instance {
         // SAFETY: the unit is initialized; `ts` and `flags` are locals; `abl` holds `n` buffers
         // each pointing at `frames` floats we own; the input callback's state is alive.
         let st = unsafe { AudioUnitRender(self.unit, &mut flags, &ts, 0, frames as u32, &mut self.abl) };
+        if st == 0 {
+            for (index, (outputs, list)) in self.extra_outputs.iter_mut().enumerate() {
+                for (buffer, samples) in list.buffers.iter_mut().zip(outputs.iter_mut()) { *buffer = AudioBuffer { number_channels: 1, data_byte_size: (frames * 4) as u32, data: samples.as_mut_ptr().cast() }; }
+                list.number_buffers = outputs.len().min(MAX_AU_CHANNELS) as u32;
+                let rendered = list.number_buffers > 0 && unsafe { AudioUnitRender(self.unit, &mut flags, &ts, index as u32 + 1, frames as u32, list) } == 0;
+                for (channel, samples) in outputs.iter_mut().enumerate() {
+                    let buffer = list.buffers.get(channel).filter(|_| channel < list.number_buffers as usize);
+                    let available = if rendered { buffer.filter(|buffer| !buffer.data.is_null()).map_or(0, |buffer| (buffer.data_byte_size as usize / 4).min(frames).min(samples.len())) } else { 0 };
+                    if let Some(buffer) = buffer.filter(|_| available > 0) { unsafe { ptr::copy(buffer.data.cast::<f32>(), samples.as_mut_ptr(), available); } }
+                    samples.iter_mut().take(frames).skip(available).for_each(|sample| *sample = 0.0);
+                }
+            }
+        } else {
+            for (outputs, _) in &mut self.extra_outputs { for channel in outputs { channel.iter_mut().take(frames).for_each(|sample| *sample = 0.0); } }
+        }
         self.sample_time += frames as f64;
         if st == 0 { Ok(()) } else { Err(st) }
     }
@@ -889,7 +948,7 @@ impl Instance {
     }
 }
 
-struct LinkedUnit(Option<AudioUnit>);
+struct LinkedUnit(Option<AudioUnit>, Option<AuWindow>, *mut c_void);
 
 // SAFETY: the pointer is only used under the link's mutex, while the instance keeps the unit alive.
 unsafe impl Send for LinkedUnit {}
@@ -898,7 +957,7 @@ unsafe impl Send for LinkedUnit {}
 /// thread while the instance renders on the audio thread (hosts make property calls from other
 /// threads during rendering). The instance clears the link under its lock before it disposes of
 /// the unit, so a handle never reads a dead unit.
-pub(crate) struct StateLink(std::sync::Mutex<LinkedUnit>);
+pub(crate) struct StateLink(std::sync::Mutex<LinkedUnit>, concurrent_queue::ConcurrentQueue<(u32, bool)>, AtomicBool);
 
 impl StateLink {
     fn lock(&self) -> std::sync::MutexGuard<'_, LinkedUnit> {
@@ -936,14 +995,153 @@ impl StateLink {
         out
     }
 
-    fn kill(&self) {
-        self.lock().0 = None;
+    fn kill(&self) -> bool {
+        let mut link = self.lock();
+        if link.1.is_some() && objc2::MainThreadMarker::new().is_none() { return false; }
+        if !link.2.is_null() { unsafe { AUListenerDispose(link.2); } link.2 = ptr::null_mut(); }
+        if let Some(window) = link.1.take() { window.close(); }
+        link.0 = None;
+        true
+    }
+}
+
+#[repr(C)]
+struct AuParameter {
+    unit: AudioUnit,
+    id: u32,
+    scope: u32,
+    element: u32,
+}
+
+#[repr(C)]
+struct AuParameterEvent {
+    kind: u32,
+    parameter: AuParameter,
+}
+
+unsafe extern "C" fn parameter_event(context: *mut c_void, _object: *mut c_void, event: *const AuParameterEvent, _time: u64, _value: f32) {
+    let (Some(link), Some(event)) = (unsafe { (context as *const StateLink).as_ref() }, unsafe { event.as_ref() }) else { return };
+    if matches!(event.kind, 1 | 2) && link.1.push((event.parameter.id, event.kind == 1)).is_err() { link.2.store(true, Ordering::Release); }
+}
+
+struct AuWindow {
+    window: *mut objc2_app_kit::NSWindow,
+    factory: *mut objc2::runtime::AnyObject,
+    bundle: CFTypeRef,
+}
+
+impl AuWindow {
+    fn close(self) {
+        if objc2::MainThreadMarker::new().is_none() { return; }
+        unsafe {
+            if let Some(window) = self.window.as_ref() { window.orderOut(None); window.setContentView(None); window.close(); }
+            drop(objc2::rc::Retained::from_raw(self.window));
+            drop(objc2::rc::Retained::from_raw(self.factory));
+        }
+        release(self.bundle);
+    }
+}
+
+impl StateLink {
+    pub fn listen_gestures(&self, ids: &[u32]) {
+        if objc2::MainThreadMarker::new().is_none() { return; }
+        let mut link = self.lock();
+        if !link.2.is_null() { return; }
+        let Some(unit) = link.0 else { return };
+        let mut listener = ptr::null_mut();
+        let status = unsafe { AUEventListenerCreate(parameter_event, (self as *const Self).cast_mut().cast(), CFRunLoopGetCurrent(), kCFRunLoopDefaultMode, 0.01, 0.0, &mut listener) };
+        if status != 0 || listener.is_null() { return; }
+        for id in ids {
+            for kind in [1u32, 2] {
+                let event = AuParameterEvent { kind, parameter: AuParameter { unit, id: *id, scope: SCOPE_GLOBAL, element: 0 } };
+                unsafe { AUEventListenerAddEventType(listener, ptr::null_mut(), &event); }
+            }
+        }
+        link.2 = listener;
+    }
+
+    pub fn take_gestures(&self, ids: &[u32]) -> Vec<(u32, bool)> {
+        let mut gestures = Vec::new();
+        for _ in 0..1024 { let Ok(gesture) = self.1.pop() else { break }; gestures.push(gesture); }
+        if self.2.swap(false, Ordering::AcqRel) { gestures.extend(ids.iter().map(|id| (*id, false))); }
+        gestures
+    }
+
+    pub fn open_editor(&self, title: &str) -> Result<(), String> {
+        use objc2::{MainThreadMarker, MainThreadOnly, msg_send};
+        use objc2::rc::Retained;
+        use objc2::runtime::{AnyClass, AnyObject};
+        use objc2_app_kit::{NSBackingStoreType, NSFloatingWindowLevel, NSView, NSWindow, NSWindowStyleMask};
+        use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+        let marker = MainThreadMarker::new().ok_or_else(|| "Open Audio Unit editors on the main thread".to_string())?;
+        let mut link = self.lock();
+        if let Some(editor) = &link.1 {
+            if let Some(window) = unsafe { editor.window.as_ref() } { window.makeKeyAndOrderFront(None); return Ok(()); }
+        }
+        let unit = link.0.ok_or_else(|| "Audio Unit is no longer loaded".to_string())?;
+        let mut size = 0u32;
+        let mut writable = 0u8;
+        let status = unsafe { AudioUnitGetPropertyInfo(unit, 31, SCOPE_GLOBAL, 0, &mut size, &mut writable) };
+        let word = std::mem::size_of::<usize>();
+        if status != 0 || (size as usize) < word * 2 || (size as usize) > word * 65 { return Err("This Audio Unit has no native Cocoa editor; use its parameter controls".into()); }
+        let mut info = vec![0usize; (size as usize).div_ceil(word)];
+        let status = unsafe { AudioUnitGetProperty(unit, 31, SCOPE_GLOBAL, 0, info.as_mut_ptr().cast(), &mut size) };
+        if status != 0 { return Err(format!("Cannot read the Audio Unit editor ({status})")); }
+        let url = info.first().copied().unwrap_or(0) as CFTypeRef;
+        let names: Vec<_> = info.iter().skip(1).take((size as usize / word).saturating_sub(1)).map(|name| cf_string(*name as CFTypeRef)).collect();
+        let bundle = unsafe { CFBundleCreate(ptr::null(), url) };
+        for value in &info { release(*value as CFTypeRef); }
+        if bundle.is_null() { return Err("Cannot locate the Audio Unit editor bundle".into()); }
+        if unsafe { CFBundleLoadExecutable(bundle) } == 0 { release(bundle); return Err("Cannot load the Audio Unit editor bundle".into()); }
+        for name in names {
+            let Ok(name) = std::ffi::CString::new(name) else { continue };
+            let Some(class) = AnyClass::get(&name) else { continue };
+            let factory: Option<Retained<AnyObject>> = unsafe { msg_send![class, new] };
+            let Some(factory) = factory else { continue };
+            let view: Option<Retained<NSView>> = unsafe { msg_send![&*factory, uiViewForAudioUnit: unit, withSize: NSSize::new(640.0, 480.0)] };
+            let Some(view) = view else { continue };
+            let size = view.frame().size;
+            let width = if size.width.is_finite() { size.width.clamp(120.0, 4096.0) } else { 640.0 };
+            let height = if size.height.is_finite() { size.height.clamp(100.0, 4096.0) } else { 480.0 };
+            let window = unsafe { NSWindow::initWithContentRect_styleMask_backing_defer(NSWindow::alloc(marker), NSRect::new(NSPoint::new(200.0, 200.0), NSSize::new(width, height)), NSWindowStyleMask::Titled | NSWindowStyleMask::Closable, NSBackingStoreType::Buffered, false) };
+            unsafe { window.setReleasedWhenClosed(false); }
+            window.setTitle(&NSString::from_str(title));
+            window.setLevel(NSFloatingWindowLevel);
+            window.setHidesOnDeactivate(true);
+            window.setContentView(Some(&view));
+            window.center();
+            window.makeKeyAndOrderFront(None);
+            link.1 = Some(AuWindow { window: Retained::into_raw(window), factory: Retained::into_raw(factory), bundle });
+            return Ok(());
+        }
+        release(bundle);
+        Err("The Audio Unit did not provide a usable Cocoa view".into())
+    }
+
+    pub fn close_editor(&self) {
+        if objc2::MainThreadMarker::new().is_none() { return; }
+        if let Some(window) = self.lock().1.take() { window.close(); }
+    }
+
+    pub fn editor_open(&self) -> bool {
+        if objc2::MainThreadMarker::new().is_none() { return false; }
+        self.lock().1.as_ref().is_some_and(|editor| unsafe { editor.window.as_ref() }.is_some_and(|window| window.isVisible()))
+    }
+
+    pub fn parameter_values(&self, ids: &[u32]) -> Vec<Option<f32>> {
+        let link = self.lock();
+        let Some(unit) = link.0 else { return Vec::new() };
+        ids.iter().map(|id| {
+            let mut value = 0.0;
+            let status = unsafe { AudioUnitGetParameter(unit, *id, SCOPE_GLOBAL, 0, &mut value) };
+            (status == 0 && value.is_finite()).then_some(value)
+        }).collect()
     }
 }
 
 impl Drop for Instance {
     fn drop(&mut self) {
-        self.link.kill();
+        if !self.link.kill() { std::mem::forget(std::sync::Arc::clone(&self.link)); return; }
         // SAFETY: the unit is live (disposed only here); after disposal nothing can call the
         // input callback or the host callbacks, so the leaked input state and host time can be
         // freed.

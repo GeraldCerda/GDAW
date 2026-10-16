@@ -8,7 +8,7 @@ pub enum PluginGrouping {
     Effect,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum PluginFormat {
     #[default]
     All,
@@ -30,7 +30,7 @@ impl PluginFormat {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BrowserPlugin {
     pub id: String,
     pub name: String,
@@ -98,23 +98,36 @@ pub fn built_in_catalog() -> Vec<BrowserPlugin> {
 
 pub fn catalog(rescan: bool) -> Vec<BrowserPlugin> {
     let mut plugins = built_in_catalog();
-    let clap = if rescan { soundcraft_clap_host::rescan() } else { soundcraft_clap_host::cached().unwrap_or_else(soundcraft_clap_host::scan) };
+    for format in [PluginFormat::Au, PluginFormat::Vst3, PluginFormat::Clap] {
+        plugins.extend(catalog_format(format, rescan));
+    }
+    normalize(&mut plugins);
+    plugins
+}
+
+pub fn catalog_format(format: PluginFormat, rescan: bool) -> Vec<BrowserPlugin> {
+    let mut plugins = Vec::new();
+    let clap = if format != PluginFormat::Clap { Vec::new() } else if rescan { soundcraft_clap_host::rescan() } else { soundcraft_clap_host::cached().unwrap_or_else(soundcraft_clap_host::scan) };
     for plugin in clap {
         plugins.push(entry(&plugin.id, &plugin.name, &plugin.vendor, plugin.category, plugin.is_instrument, PluginFormat::Clap, &plugin.features));
     }
-    let vst3 = if rescan { soundcraft_vst3_host::rescan() } else { soundcraft_vst3_host::cached().unwrap_or_else(soundcraft_vst3_host::scan) };
+    let vst3 = if format != PluginFormat::Vst3 { Vec::new() } else if rescan { soundcraft_vst3_host::rescan() } else { soundcraft_vst3_host::cached().unwrap_or_else(soundcraft_vst3_host::scan) };
     for plugin in vst3 {
         plugins.push(entry(&plugin.id, &plugin.name, &plugin.vendor, plugin.category, plugin.is_instrument, PluginFormat::Vst3, &plugin.sub_categories));
     }
-    let au = if rescan { soundcraft_au_host::rescan() } else { soundcraft_au_host::scan() };
+    let au = if format != PluginFormat::Au { Vec::new() } else if rescan { soundcraft_au_host::rescan() } else { soundcraft_au_host::scan() };
     for plugin in au {
         let developer = if plugin.vendor.trim().is_empty() { &plugin.manufacturer } else { &plugin.vendor };
         plugins.push(entry(&plugin.id, &plugin.name, developer, plugin.category, plugin.is_instrument, PluginFormat::Au, &[]));
     }
+    normalize(&mut plugins);
+    plugins
+}
+
+pub fn normalize(plugins: &mut Vec<BrowserPlugin>) {
     plugins.sort_by_cached_key(|plugin| plugin.id.clone());
     plugins.dedup_by(|a, b| a.id == b.id);
-    reconcile_effect_groups(&mut plugins);
-    plugins
+    reconcile_effect_groups(plugins);
 }
 
 fn reconcile_effect_groups(plugins: &mut [BrowserPlugin]) {

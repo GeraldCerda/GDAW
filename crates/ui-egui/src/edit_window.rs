@@ -1386,15 +1386,15 @@ fn io_column(app: &mut SoundApp, ui: &mut Ui, track: &Track, r: Rect) {
     }
 }
 
-fn plugin_cells(r: Rect) -> Vec<Rect> {
+fn plugin_cells(r: Rect, count: usize) -> Vec<Rect> {
     if r.height() < 12.0 || r.width() < 20.0 {
         return Vec::new();
     }
     let inner = r.shrink2(vec2(4.0, 1.0));
-    let (columns, rows) = if inner.height() >= 65.0 { (1, 5) } else if inner.height() >= 28.0 { (3, 2) } else { (5, 1) };
+    let (columns, rows) = if inner.height() >= 65.0 { (1, count) } else if inner.height() >= 28.0 { (3, 2) } else { (count, 1) };
     let width = (inner.width() - 3.0 * (columns - 1) as f32) / columns as f32;
     let step = (inner.height() / rows as f32).min(18.0);
-    (0..5).map(|index| Rect::from_min_size(
+    (0..count).map(|index| Rect::from_min_size(
         inner.min + vec2((index % columns) as f32 * (width + 3.0), (index / columns) as f32 * step),
         vec2(width, (step - 2.0).clamp(8.0, 15.0)),
     )).collect()
@@ -1408,7 +1408,8 @@ fn plugin_column(app: &mut SoundApp, ui: &mut Ui, track: &Track, col: &str, r: R
     if col == "instruments" { return; }
     let off = if col.ends_with("ae") { 0 } else { 5 };
     let slot = if col.starts_with("inserts") { crate::mix_window::insert_slot } else { crate::mix_window::send_slot };
-    for (index, cell) in plugin_cells(r).into_iter().enumerate() {
+    let count = if col == "inserts_fj" && track.instrument_insert_slot() == Some(soundcraft_model::INSERT_SLOTS) { 6 } else { 5 };
+    for (index, cell) in plugin_cells(r, count).into_iter().enumerate() {
         slot(app, &mut ui, track, off + index, cell);
     }
 }
@@ -3976,7 +3977,7 @@ mod slot_geometry_tests {
         for height in [16.0, 24.0, 46.0, 66.0, 88.0, 132.0, 440.0] {
             for width in [75.0, 92.0] {
                 let bounds = Rect::from_min_size(pos2(100.0, 150.0), vec2(width, height));
-                let cells = plugin_cells(bounds);
+                let cells = plugin_cells(bounds, 5);
                 assert_eq!(cells.len(), 5);
                 for (index, cell) in cells.iter().enumerate() {
                     assert!(bounds.contains_rect(*cell), "{height}: {cell:?}");

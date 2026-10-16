@@ -21,8 +21,8 @@ pub mod ops_windows;
 pub mod palette;
 pub mod panels;
 pub mod plugin_browser;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod plugin_scan;
+mod parameter_automation;
 mod recent;
 pub mod recovery;
 pub mod sampler_window;
@@ -342,6 +342,8 @@ pub struct SoundApp {
     /// The pass's last point; `i64::MIN` after a stop or a jump, so the next point erases nothing it skipped.
     last_write_at: Samples,
     touch_baselines: std::collections::HashMap<TrackId, soundcraft_model::AutomationLane>,
+    parameter_automation: parameter_automation::ParameterAutomation,
+    pending_editors: Vec<(TrackId, usize, u8)>,
     pub frame_ms: f32,
     last_frame: Option<f64>,
     last_meter_poll: f64,
@@ -425,6 +427,8 @@ impl SoundApp {
             touched: std::collections::HashSet::new(),
             last_write_at: i64::MIN,
             touch_baselines: std::collections::HashMap::new(),
+            parameter_automation: parameter_automation::ParameterAutomation::default(),
+            pending_editors: Vec::new(),
             frame_ms: 0.0,
             last_frame: None,
             last_meter_poll: f64::NEG_INFINITY,
@@ -438,6 +442,35 @@ impl SoundApp {
     pub fn with_control(mut self, rx: Receiver<ControlRequest>) -> Self {
         self.control_rx = Some(rx);
         self
+    }
+
+    pub fn show_insert_result(&mut self, result: &Value) {
+        let Some(track) = result.get("track").and_then(Value::as_u64).map(TrackId) else { return };
+        let visual = result.get("slot").and_then(Value::as_u64).and_then(|slot| usize::try_from(slot).ok())
+            .or_else(|| self.engine.session().track(track).and_then(|track| track.instrument_insert_slot())).unwrap_or(0);
+        let address = if self.engine.session().track(track).is_some_and(|track| track.instrument_insert_slot() == Some(visual)) { soundcraft_mix::INSTRUMENT_SLOT } else { visual };
+        if !self.pending_editors.iter().any(|(id, slot, _)| *id == track && *slot == address) { self.pending_editors.push((track, address, 0)); }
+    }
+
+    fn open_pending_editors(&mut self, ctx: &egui::Context) {
+        let requests = std::mem::take(&mut self.pending_editors);
+        for (track, slot, attempt) in requests {
+            let insert = self.engine.session().track(track).and_then(|track| if slot == soundcraft_mix::INSTRUMENT_SLOT { track.instrument.as_ref() } else { track.mixer.inserts.get(slot).and_then(Option::as_ref) });
+            let Some(insert) = insert else { continue };
+            let hosted = soundcraft_mix::is_third_party(&insert.plugin);
+            if hosted {
+                if let Some(player) = &self.player {
+                    if player.has_editor(track, slot) {
+                        match player.open_editor(track, slot) { Ok(()) => continue, Err(error) => self.ui.status = error }
+                    } else if attempt < 60 {
+                        self.pending_editors.push((track, slot, attempt + 1));
+                        ctx.request_repaint_after_secs(0.05);
+                        continue;
+                    }
+                }
+            }
+            if !self.ui.plugin_windows.contains(&(track, slot)) { self.ui.plugin_windows.push((track, slot)); }
+        }
     }
 
     /// Run a command; errors go to the status line. Returns the result.
@@ -455,13 +488,14 @@ impl SoundApp {
         let replacing = matches!(id, "session.new" | "session.open" | "session.close" | "session.revert");
         match self.engine.execute(id, &params) {
             Ok(v) => {
+                if replacing { self.parameter_automation = parameter_automation::ParameterAutomation::default(); }
                 if replacing || (id.starts_with("session.save") && !self.engine.is_dirty()) {
                     self.release_autosave(false);
                 }
                 if id == "mix.routing_diagnostics" {
                     let issues = v.get("issues").and_then(Value::as_array);
                     self.ui.status = match issues {
-                        Some(issues) if issues.is_empty() => "Routing: no cycles or missing buses".into(),
+                        Some(issues) if issues.is_empty() => "Routing: no cycles, missing buses or unavailable output paths".into(),
                         Some(issues) => issues.iter().filter_map(|issue| {
                             let id = issue.get("track")?.as_u64()?;
                             let problem = issue.get("problem")?.as_str()?;
@@ -1011,14 +1045,16 @@ impl SoundApp {
         let plan = self.take_plan.take();
         let Some(r) = &mut self.recorder else { return };
         let (takes, problem) = r.finish();
+        let capture_clock = r.first_capture_clock();
         let tracks = takes.len().max(1);
-        let plan = plan.unwrap_or_else(|| soundcraft_engine::io::Recording {
+        let mut plan = plan.unwrap_or_else(|| soundcraft_engine::io::Recording {
             start: self.record_start,
             pass: None,
             punch: self.punch,
             rate: 0,
             takes: Vec::new(),
         });
+        if let Some(position) = capture_clock.and_then(|clock| self.player.as_ref().and_then(|player| player.recording_position_at(clock))) { plan.start = position; }
         self.punch = None;
         self.autosaved_rev = 0;
         let ids = soundcraft_engine::io::place_recording(&mut self.engine, &plan, takes);
@@ -1301,6 +1337,7 @@ impl SoundApp {
             self.ui.insert_views_revision = 1;
         }
         crate::devices::prepare_drum_library(self);
+        crate::devices::prepare_plugins(self);
         let light = theme::wants_light(ctx, self.ui.theme);
         if self.theme_applied != Some(light) || theme::is_light() != light {
             theme::apply(ctx, light);
@@ -1326,14 +1363,25 @@ impl SoundApp {
         self.watch_input();
         // Stop the old playback before sending a replacement session to the audio thread.
         self.handle_transport(dt);
+        if self.engine.transport.recording {
+            if let Some(position) = self.recorder.as_ref().and_then(|recorder| recorder.first_capture_clock()).and_then(|clock| self.player.as_ref().and_then(|player| player.recording_position_at(clock))) {
+                self.record_start = position;
+                if let Some(plan) = &mut self.take_plan { plan.start = position; }
+            }
+        }
+        self.autosave_changes();
+        self.write_automation(ctx);
+        let gestures = self.player.as_ref().map_or_else(Vec::new, Player::editor_gestures);
+        let position = self.position();
+        let playing = self.is_playing();
+        self.parameter_automation.step(&mut self.engine, position, playing, ctx.input(|input| input.pointer.any_down()), gestures);
         if self.engine.revision != self.last_rev {
             self.last_rev = self.engine.revision;
             if let Some(p) = &self.player {
                 p.update_session(self.engine.session_arc());
             }
         }
-        self.autosave_changes();
-        self.write_automation(ctx);
+        self.open_pending_editors(ctx);
         self.autosave();
         if self.recorder.is_none()
             && !self.recorder_failed
@@ -1390,6 +1438,7 @@ impl SoundApp {
             ctx.request_repaint();
             return;
         }
+        if crate::devices::startup(self, ui) { return; }
         if self.arrange_request {
             self.arrange_request = false;
             ctx.memory_mut(|m| m.reset_areas());
@@ -1448,7 +1497,7 @@ impl SoundApp {
 }
 
 fn physical_input_track(track: &soundcraft_model::Track) -> bool {
-    track.kind == TrackKind::Audio && !track.inactive && track.mixer.input.hardware_input_start().is_some()
+    matches!(track.kind, TrackKind::Audio | TrackKind::Aux | TrackKind::Folder) && !track.inactive && track.mixer.input.hardware_input_start().is_some()
 }
 
 fn raw_input_on_track_meter(track: &soundcraft_model::Track, playing: bool) -> bool {

@@ -42,6 +42,11 @@ pub fn default_search_paths() -> Vec<PathBuf> {
         std::env::var_os("COMMONPROGRAMFILES").map(PathBuf::from),
         std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
     );
+    if cfg!(target_os = "macos") {
+        if let Ok(executable) = std::env::current_exe() {
+            if let Some(contents) = executable.parent().and_then(Path::parent) { v.push(contents.join("VST3")); }
+        }
+    }
     if let Some(cp) = std::env::var_os("VST3_PATH") {
         v.extend(std::env::split_paths(&cp).filter(|p| !p.as_os_str().is_empty()));
     }
@@ -57,6 +62,7 @@ pub fn os_search_paths(os: Os, home: Option<PathBuf>, common_program_files: Opti
                 v.push(h.join("Library/Audio/Plug-Ins/VST3"));
             }
             v.push(PathBuf::from("/Library/Audio/Plug-Ins/VST3"));
+            v.push(PathBuf::from("/Network/Library/Audio/Plug-Ins/VST3"));
         }
         Os::Windows => {
             if let Some(c) = common_program_files {
@@ -86,17 +92,18 @@ pub fn is_vst3_path(p: &Path) -> bool {
 /// A `.vst3` directory is a bundle and is not descended into. The result is sorted and deduplicated.
 pub fn find_bundles(dirs: &[PathBuf]) -> Vec<PathBuf> {
     let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     let mut budget = MAX_ENTRIES;
-    for d in dirs {
-        if is_vst3_path(d) && d.exists() {
-            out.push(d.clone());
-        } else {
-            walk(d, 0, &mut out, &mut budget);
+    for directory in dirs {
+        let mut found = Vec::new();
+        if is_vst3_path(directory) && directory.exists() { found.push(directory.clone()); }
+        else { walk(directory, 0, &mut found, &mut budget); }
+        found.sort();
+        for path in found {
+            if out.len() >= MAX_BUNDLES { return out; }
+            if seen.insert(path.clone()) { out.push(path); }
         }
     }
-    out.sort();
-    out.dedup();
-    out.truncate(MAX_BUNDLES);
     out
 }
 
@@ -294,7 +301,7 @@ mod tests {
     #[test]
     fn os_paths_cover_the_standard_locations() {
         let mac = os_search_paths(Os::MacOs, Some("/Users/u".into()), None, None);
-        assert_eq!(mac, vec![PathBuf::from("/Users/u/Library/Audio/Plug-Ins/VST3"), PathBuf::from("/Library/Audio/Plug-Ins/VST3")]);
+        assert_eq!(mac, vec![PathBuf::from("/Users/u/Library/Audio/Plug-Ins/VST3"), PathBuf::from("/Library/Audio/Plug-Ins/VST3"), PathBuf::from("/Network/Library/Audio/Plug-Ins/VST3")]);
         let win = os_search_paths(Os::Windows, None, Some("C:/CPF".into()), Some("C:/LAD".into()));
         assert_eq!(win[0], PathBuf::from("C:/CPF").join("VST3"));
         assert_eq!(win.len(), 2);

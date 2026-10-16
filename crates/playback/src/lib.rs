@@ -29,7 +29,7 @@ mod mailbox;
 pub use devices::AudioConfig;
 
 use soundcraft_dsp::{Plugin, PluginEditor, PluginStateReader};
-use soundcraft_mix::{MAX_CHANNELS, MixEngine, PreparedInstance, StripMeter, itu_stereo_fold, main_channels};
+use soundcraft_mix::{MAX_CHANNELS, MixEngine, PreparedInstance, StripMeter, itu_stereo_fold};
 use soundcraft_model::{Session, TrackId};
 use soundcraft_time::{Range, Samples};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -99,12 +99,20 @@ impl PreparedPlayback {
         let mut mix = new_engine(session.sample_rate.as_f64() as f32);
         mix.adopt(instances);
         mix.ensure_synced(&session);
-        let pending = vec![vec![0.0; BLOCK]; main_channels(&session)];
+        let pending = vec![vec![0.0; BLOCK]; soundcraft_mix::device_channels(&session)];
         Self { session, mix, pending, fresh }
     }
 }
 
+#[derive(Default)]
+struct RecordClock {
+    nanos: AtomicU64,
+    position: AtomicI64,
+    rate: AtomicU32,
+}
+
 struct Shared {
+    record_clock: RecordClock,
     position: AtomicI64,
     playing: AtomicBool,
     auditioning: AtomicBool,
@@ -318,7 +326,7 @@ fn new_engine(sr: f32) -> MixEngine {
 impl AudioState {
     fn new(rx: Receiver<Cmd>, shared: Arc<Shared>, session: Arc<Session>, device_rate: f64, garbage: Sender<Vec<Box<dyn Plugin>>>) -> Self {
         let sr = session.sample_rate.as_f64() as f32;
-        let nch = main_channels(&session);
+        let nch = soundcraft_mix::device_channels(&session);
         let mut mix = new_engine(sr);
         mix.ensure_synced(&session);
         AudioState {
@@ -413,7 +421,7 @@ impl AudioState {
                     }
                     self.mix.adopt(instances);
                     // The main format changed (a document edit, not steady state): resize.
-                    let nch = main_channels(&s);
+                    let nch = soundcraft_mix::device_channels(&s);
                     if self.pending.len() != nch {
                         self.pending = vec![vec![0.0; BLOCK]; nch];
                         self.pending_len = 0;
@@ -502,7 +510,7 @@ impl AudioState {
         }
         self.mix.monitor_only = !self.playing;
         self.mix.recording = self.recording;
-        self.mix.render(&self.session, self.pos, n, &mut self.pending);
+        self.mix.render_device(&self.session, self.pos, n, &mut self.pending);
         self.send_garbage();
         self.pending_len = n;
         self.shared.meters.publish(&self.mix.meters, &self.mix.main_meter);
@@ -516,8 +524,9 @@ impl AudioState {
     fn fill(&mut self, out: &mut [f32], channels: usize) {
         self.drain();
         let channels = channels.max(1);
-        let monitoring = self.input.is_some() && self.session.tracks.iter().any(|t| t.mixer.input_monitor || t.mixer.record_arm);
+        let monitoring = self.input.is_some() && self.session.tracks.iter().any(|t| t.mixer.input_monitor || t.mixer.record_arm || (matches!(t.kind, soundcraft_model::TrackKind::Aux | soundcraft_model::TrackKind::Folder) && t.mixer.input.hardware_input_start().is_some()));
         if !self.playing && !monitoring && self.audition_frames == 0 {
+            self.mix.flush_parameters(&self.session);
             if let Some(input) = &self.input {
                 input.discard();
             }
@@ -550,7 +559,7 @@ impl AudioState {
                 let b = ch.and_then(|v| v.get(i0 + 1)).copied().unwrap_or(a);
                 a + (b - a) * fr
             };
-            if nch > 2 && channels < nch {
+            if nch > 2 && channels < nch && self.session.outputs.len() <= 1 {
                 // Fewer device channels than the main mix: ITU fold-down to stereo.
                 let (mut l, mut r) = (0.0f32, 0.0f32);
                 if sounding {
@@ -597,6 +606,7 @@ struct Side {
     rate: f32,
     /// Editor handles of the live instances.
     editors: HashMap<(TrackId, usize), Box<dyn PluginEditor>>,
+    layouts: HashMap<(TrackId, usize), (bool, usize)>,
     /// State readers of the live instances.
     states: BTreeMap<(TrackId, usize), Box<dyn PluginStateReader>>,
     /// Instances that refused their stored state: saves keep that state until the plugin's editor
@@ -611,7 +621,7 @@ struct Side {
 
 impl Side {
     fn new(rate: f32, garbage: Receiver<Vec<Box<dyn Plugin>>>) -> Side {
-        Side { shadow: HashMap::new(), rate, editors: HashMap::new(), states: BTreeMap::new(), refused: HashSet::new(), garbage, old_sessions: None, retired_states: None, retired_inputs: None, latest_session: None }
+        Side { shadow: HashMap::new(), rate, editors: HashMap::new(), layouts: HashMap::new(), states: BTreeMap::new(), refused: HashSet::new(), garbage, old_sessions: None, retired_states: None, retired_inputs: None, latest_session: None }
     }
 
     /// Drops retired instances (closing their editors first, inside the plugin's drop) and
@@ -642,6 +652,7 @@ impl Side {
     }
 
     fn forget(&mut self, key: (TrackId, usize)) {
+        self.layouts.remove(&key);
         self.shadow.remove(&key);
         self.states.remove(&key);
         self.refused.remove(&key);
@@ -720,9 +731,11 @@ impl Player {
             speed: AtomicU32::new(1000),
             meters: MeterMailbox::default(),
             session_pending: AtomicBool::new(false),
+            record_clock: RecordClock::default(),
         });
+        let _ = record::clock_nanos();
         let want = session.sample_rate.hz();
-        let want_ch = u16::try_from(main_channels(&session)).unwrap_or(2);
+        let want_ch = 64;
         let side_rate = session.sample_rate.as_f64() as f32;
         let new_side = |garbage: Receiver<Vec<Box<dyn Plugin>>>| Mutex::new(Side::new(side_rate, garbage));
         match open_device(want, want_ch, cfg) {
@@ -913,9 +926,22 @@ impl Player {
         out
     }
 
+    pub fn editor_gestures(&self) -> Vec<(TrackId, usize, String, bool)> {
+        let mut side = self.side();
+        let mut out = Vec::new();
+        for (&(track, slot), editor) in side.editors.iter_mut() {
+            for (parameter, begin) in editor.take_gestures() { out.push((track, slot, parameter, begin)); }
+        }
+        out
+    }
+
     /// True when the plugin in this slot has its own editor.
     pub fn has_editor(&self, track: TrackId, slot: usize) -> bool {
         self.side().editors.contains_key(&(track, slot))
+    }
+
+    pub fn plugin_routing_info(&self, track: TrackId, slot: usize) -> (bool, usize) {
+        self.side().layouts.get(&(track, slot)).copied().unwrap_or((false, 1))
     }
 
     /// Opens the plugin's own editor window. Main thread only.
@@ -971,6 +997,7 @@ impl Player {
     }
 
     pub fn set_recording(&self, on: bool) {
+        if on { self.shared.record_clock.nanos.store(0, Ordering::Release); }
         let _ = self.send(Cmd::Recording(on));
     }
 
@@ -993,6 +1020,15 @@ impl Player {
     /// Playback rate last requested, 1.0 at full speed.
     pub fn speed(&self) -> f32 {
         self.shared.speed.load(Ordering::Relaxed) as f32 / 1000.0
+    }
+
+    pub fn recording_position_at(&self, nanos: u64) -> Option<Samples> {
+        let anchor = self.shared.record_clock.nanos.load(Ordering::Acquire);
+        if anchor == 0 { return None; }
+        let position = self.shared.record_clock.position.load(Ordering::Relaxed);
+        let rate = self.shared.record_clock.rate.load(Ordering::Relaxed);
+        let offset = (i128::from(nanos) - i128::from(anchor)) * i128::from(rate) / 1_000_000_000;
+        Some(position.saturating_add(offset.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64))
     }
 
     pub fn position(&self) -> Samples {
@@ -1066,6 +1102,7 @@ impl Side {
             log::debug!("plugin instance for {:?} slot {}: {} ({} ch, created: {})", spec.track, spec.slot, spec.id, spec.ch, made.is_some());
             self.shadow.insert(key, (spec.id.clone(), spec.ch, made.is_some()));
             if let Some(soundcraft_mix::NewInstance { mut plugin, refused_state }) = made {
+                self.layouts.insert(key, (plugin.has_sidechain(), plugin.output_bus_count().min(16)));
                 if let Some(e) = plugin.editor() {
                     self.editors.insert(key, e);
                 }
@@ -1118,11 +1155,22 @@ where
     let (failed, guard, gone) = (Arc::clone(fault), Arc::clone(shared), Arc::clone(fault));
     device.build_output_stream(
         config,
-        move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
+        move |data: &mut [T], info: &cpal::OutputCallbackInfo| {
             mark_audio_thread();
             for out in data.chunks_mut(chunk) {
                 let Some(s) = scratch.get_mut(..out.len()) else { return };
-                guarded_block(&failed, &guard, s, |d| state.fill(d, channels));
+                guarded_block(&failed, &guard, s, |d| {
+                    state.drain();
+                    if state.playing && state.recording && state.shared.record_clock.nanos.load(Ordering::Acquire) == 0 {
+                        let timestamp = info.timestamp();
+                        let delay = timestamp.playback.duration_since(&timestamp.callback).map_or(0, |duration| duration.as_nanos().min(u128::from(u64::MAX)) as u64);
+                        let first = state.pos.saturating_sub(state.pending_len as i64).saturating_add(state.read.floor() as i64);
+                        state.shared.record_clock.position.store(first, Ordering::Relaxed);
+                        state.shared.record_clock.rate.store(state.session.sample_rate.hz(), Ordering::Relaxed);
+                        state.shared.record_clock.nanos.store(record::clock_nanos().saturating_add(delay).max(1), Ordering::Release);
+                    }
+                    state.fill(d, channels);
+                });
                 for (o, x) in out.iter_mut().zip(s.iter()) {
                     *o = T::from_sample(*x);
                 }
@@ -1226,6 +1274,7 @@ mod tests {
             speed: AtomicU32::new(1000),
             meters: MeterMailbox::default(),
             session_pending: AtomicBool::new(false),
+            record_clock: RecordClock::default(),
         };
         let fault = Fault::default();
         let mut out = [0.5f32; 8];
@@ -1268,6 +1317,7 @@ mod tests {
             speed: AtomicU32::new(1000),
             meters: MeterMailbox::default(),
             session_pending: AtomicBool::new(false),
+            record_clock: RecordClock::default(),
         });
         let (tx, rx) = channel();
         let mut st = AudioState::new(rx, Arc::clone(&shared), s, 48_000.0, channel().0);
@@ -1287,6 +1337,7 @@ mod tests {
             speed: AtomicU32::new(1000),
             meters: MeterMailbox::default(),
             session_pending: AtomicBool::new(false),
+            record_clock: RecordClock::default(),
         });
         let (tx, rx) = channel();
         let mut st = AudioState::new(rx, Arc::clone(&shared), s, 48_000.0, channel().0);
@@ -1313,6 +1364,7 @@ mod tests {
             speed: AtomicU32::new(1000),
             meters: MeterMailbox::default(),
             session_pending: AtomicBool::new(false),
+            record_clock: RecordClock::default(),
         });
         let (tx, rx) = channel();
         let mut st = AudioState::new(rx, Arc::clone(&shared), Arc::clone(&s), 48_000.0, channel().0);
@@ -1347,6 +1399,7 @@ mod tests {
             speed: AtomicU32::new(1000),
             meters: MeterMailbox::default(),
             session_pending: AtomicBool::new(false),
+            record_clock: RecordClock::default(),
         });
         let (tx, rx) = channel();
         let (gtx, grx) = channel();
@@ -1440,6 +1493,7 @@ mod tests {
             speed: AtomicU32::new(1000),
             meters: MeterMailbox::default(),
             session_pending: AtomicBool::new(false),
+            record_clock: RecordClock::default(),
         });
         let (tx, rx) = channel();
         let (gtx, grx) = channel();
@@ -1470,6 +1524,7 @@ mod tests {
             speed: AtomicU32::new(1000),
             meters: MeterMailbox::default(),
             session_pending: AtomicBool::new(false),
+            record_clock: RecordClock::default(),
         });
         let (tx, rx) = channel();
         let mut st = AudioState::new(rx, Arc::clone(&shared), s, 48_000.0, channel().0);
@@ -1506,6 +1561,7 @@ mod tests {
                 speed: AtomicU32::new(1000),
                 meters: MeterMailbox::default(),
             session_pending: AtomicBool::new(false),
+            record_clock: RecordClock::default(),
             });
             let (tx, rx) = channel();
             let mut st = AudioState::new(rx, Arc::clone(&shared), Arc::new(s), 48_000.0, channel().0);
@@ -1538,6 +1594,7 @@ mod tests {
             speed: AtomicU32::new(1000),
             meters: MeterMailbox::default(),
             session_pending: AtomicBool::new(false),
+            record_clock: RecordClock::default(),
         });
         let (tx, rx) = channel();
         let mut st = AudioState::new(rx, Arc::clone(&shared), Arc::new(s), 48_000.0, channel().0);
@@ -1567,6 +1624,7 @@ mod audition_transport_tests {
             position: AtomicI64::new(0), playing: AtomicBool::new(false), auditioning: AtomicBool::new(false), speed: AtomicU32::new(1000),
             meters: MeterMailbox::default(),
             session_pending: AtomicBool::new(false),
+            record_clock: RecordClock::default(),
         });
         let (sender, receiver) = channel();
         let mut state = AudioState::new(receiver, shared, Arc::new(session), 48_000.0, channel().0);
@@ -1611,7 +1669,7 @@ mod long_preview_lifetime_tests {
         session.track_mut(track).unwrap().instrument=Some(rack);
         let shared=Arc::new(Shared {
             position:AtomicI64::new(0), playing:AtomicBool::new(false), auditioning:AtomicBool::new(false),
-            speed:AtomicU32::new(1000), meters:MeterMailbox::default(), session_pending:AtomicBool::new(false),
+            speed:AtomicU32::new(1000), meters:MeterMailbox::default(), session_pending:AtomicBool::new(false), record_clock:RecordClock::default(),
         });
         let (sender,receiver)=channel();
         let mut state=AudioState::new(receiver,shared.clone(),Arc::new(session),44_100.0,channel().0);

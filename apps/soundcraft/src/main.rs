@@ -281,6 +281,7 @@ fn main() -> eframe::Result {
             app.preset_dir = prefs_path().and_then(|p| p.parent().map(|d| d.join("Presets")));
             app.extra.ui_scale = prefs.ui_scale;
             app.ui = prefs;
+            soundcraft_ui_egui::devices::begin_startup_scan(&mut app);
             if let Some(port) = control_port {
                 let rx = control_server::start(port, cc.egui_ctx.clone());
                 app = app.with_control(rx);

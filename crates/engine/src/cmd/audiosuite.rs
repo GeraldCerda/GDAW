@@ -12,7 +12,7 @@ pub fn specs() -> Vec<CommandSpec> {
         "AudioSuite Process",
         [],
         None,
-        "{process: <plugin id> | normalize | reverse | invert | gain | duplicate | time_stretch | pitch_shift | varispeed | signal_generator, params?: {..}, clips?, tracks?, start?, end?} — signal_generator fills start..end (default: the selection) with a new clip on each audio track in `tracks` (default: the selected tracks)",
+        "{process: <plugin id> | normalize | reverse | invert | gain | duplicate | time_stretch | pitch_shift | varispeed | signal_generator, params?: {..}, clips?, tracks?, start?, end?, whole_clip?: false} — signal_generator fills start..end (default: the selection) with a new clip on each audio track in `tracks` (default: the selected tracks)",
         has_selection,
         process
     )]
@@ -46,6 +46,8 @@ fn process(e: &mut Engine, p: &Value) -> Result<Value> {
         return Err(bad("audiosuite.process", "select audio clips first"));
     }
     let sr = e.session().sample_rate;
+    let requested = if p.get("whole_clip").and_then(Value::as_bool) == Some(true) { None }
+        else if p.get("start").is_some() || p.get("end").is_some() || !e.session().edit.selection.is_empty() { Some(range_param(e, "audiosuite.process", p)?) } else { None };
     let ratio = f64::from(get("ratio", 1.0).clamp(0.25, 4.0));
     let semitones = get("semitones", 0.0).clamp(-24.0, 24.0);
     let to = (sr.as_f64() / f64::from(get("speed", 1.0).clamp(0.25, 4.0))).round().max(1.0) as u32;
@@ -65,8 +67,9 @@ fn process(e: &mut Engine, p: &Value) -> Result<Value> {
         if !clip.is_audio() {
             continue;
         }
+        let target = match requested { Some(range) => match range.intersect(&clip.range()) { Some(range) => range, None => continue }, None => clip.range() };
         let channels = e.session().track(track).map_or(1, |t| t.channels());
-        crate::io::refuse_longer(e.session(), "audiosuite.process", &clip.name, "process", clip.length, most.min(crate::io::render_limit(channels)))?;
+        crate::io::refuse_longer(e.session(), "audiosuite.process", &clip.name, "process", target.len(), most.min(crate::io::render_limit(channels)))?;
         let mut tmp = e.session().clone();
         if let Some(c) = tmp.find_clip_mut(id) {
             c.fade_in = Default::default();
@@ -80,7 +83,7 @@ fn process(e: &mut Engine, p: &Value) -> Result<Value> {
         if let Some(pl) = tmp.track_mut(track).and_then(|t| t.playlist_mut()) {
             pl.clips.retain(|c| c.id == id);
         }
-        let mut audio = soundcraft_mix::render_clips(&tmp, track, clip.range());
+        let mut audio = soundcraft_mix::render_clips(&tmp, track, target);
         let srf = sr.as_f64() as f32;
         let out: Vec<Vec<f32>> = match name.as_str() {
             "normalize" => {
@@ -112,12 +115,17 @@ fn process(e: &mut Engine, p: &Value) -> Result<Value> {
         if frames == 0 {
             continue;
         }
+        if target != clip.range() && i64::try_from(frames).ok() != Some(target.len()) { return Err(bad("audiosuite.process", "Length-changing processing requires a complete clip selection")); }
         let buf = AudioBuffer { sample_rate: sr.hz(), channels: out };
         let new_name = format!("{}-{}", clip.name, short(&name));
         let s = &mut staged;
         let src = crate::io::add_source(s, &new_name, buf, None, FileFormat::Wav);
         media.push(src);
         let mut nc: Clip = clip.clone();
+        nc.trim_start_to(target.start);
+        nc.trim_end_to(target.end);
+        if target.start > clip.start { nc.fade_in = Default::default(); }
+        if target.end < clip.end() { nc.fade_out = Default::default(); }
         nc.name = new_name;
         nc.content = ClipContent::Audio { source: src, offset: 0 };
         nc.length = i64::try_from(frames).unwrap_or(nc.length);
@@ -135,6 +143,30 @@ fn process(e: &mut Engine, p: &Value) -> Result<Value> {
             *existing = nc;
             done += 1;
         }
+        let mut fragments = Vec::new();
+        if target.start > clip.start {
+            let mut left = clip.clone();
+            left.id = s.new_clip_id();
+            left.trim_end_to(target.start);
+            left.fade_out = Default::default();
+            fragments.push(left);
+        }
+        if target.end < clip.end() {
+            let mut right = clip.clone();
+            right.id = s.new_clip_id();
+            right.trim_start_to(target.end);
+            if let ClipContent::Audio { offset, .. } = &mut right.content { *offset = clip.source_offset().saturating_add(((target.end.saturating_sub(clip.start) as f64) / clip.stretch.max(0.000001)).round() as i64); }
+            right.fade_in = Default::default();
+            fragments.push(right);
+        }
+        let prefix = format!("clip_fx.{}.", id.0);
+        let parameters: Vec<_> = s.edit.values.iter().filter_map(|(key, value)| key.strip_prefix(&prefix).map(|parameter| (parameter.to_string(), *value))).collect();
+        let bypass = s.edit.values.get(&format!("clip_fx.bypass.{}", id.0)).copied();
+        for fragment in &fragments {
+            for (parameter, value) in &parameters { s.edit.values.insert(format!("clip_fx.{}.{parameter}", fragment.id.0), *value); }
+            if let Some(value) = bypass { s.edit.values.insert(format!("clip_fx.bypass.{}", fragment.id.0), value); }
+        }
+        if let Some(playlist) = s.track_mut(track).and_then(|track| track.playlist_mut()) { playlist.clips.extend(fragments); playlist.clips.sort_by_key(|clip| clip.start); }
     }
     crate::io::persist_processed(e.session(), &mut staged, &media)?;
     if done > 0 { *e.session_mut() = staged; }
@@ -242,6 +274,21 @@ mod tests {
         let sample = engine.session().pool.get(clip.source().unwrap()).unwrap().buffer.channels[0][0];
         assert!((sample - 0.5 * soundcraft_dsp::db_to_gain(-6.0)).abs() < 1e-6);
         assert_eq!(engine.session().edit.values.get(&format!("clip_fx.{}.gain", id.0)), Some(&-6.0));
+    }
+
+    #[test]
+    fn partial_processing_preserves_neighbours_and_their_editable_effects() {
+        let (mut engine, id) = gained_clip();
+        let original = engine.session().find_clip(id).unwrap().1.clone();
+        engine.session_mut().edit.values.insert(format!("clip_fx.{}.gain", id.0), -3.0);
+        engine.execute("audiosuite.process", &json!({"process": "invert", "clips": [id.0], "start": 16, "end": 48})).unwrap();
+        let session = engine.session();
+        let clips = session.tracks[0].clips();
+        assert_eq!(clips.len(), 3);
+        assert_eq!((clips[0].start, clips[0].length, clips[0].source()), (0, 16, original.source()));
+        assert_eq!((clips[1].id, clips[1].start, clips[1].length), (id, 16, 32));
+        assert_eq!((clips[2].start, clips[2].length, clips[2].source_offset(), clips[2].source()), (48, 16, 48, original.source()));
+        for clip in clips { assert_eq!(session.edit.values.get(&format!("clip_fx.{}.gain", clip.id.0)), Some(&-3.0)); }
     }
 
     #[test]

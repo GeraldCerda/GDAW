@@ -4,7 +4,7 @@ use crate::SoundApp;
 use crate::theme::{Tokens, bold, mono, regular, rgb};
 use egui::{Align2, Color32, Rect, Sense, Stroke, Ui, pos2, vec2};
 use serde_json::json;
-use soundcraft_model::{ClipId, SourceId};
+use soundcraft_model::{ClipId, SourceId, TrackId};
 
 /// Drag a Tracks list row to reorder the tracks: a line marks the gap it will land in.
 fn drag_track(app: &mut SoundApp, ui: &Ui, row: Rect, id: u64, dropped: bool) {
@@ -487,6 +487,7 @@ fn plugin_windows(app: &mut SoundApp, ctx: &egui::Context) {
                         }
                     }
                 });
+                if soundcraft_mix::is_third_party(&ins.plugin) { plugin_routing(app, ui, tid, slot); }
                 if instrument && soundcraft_mix::is_third_party(&ins.plugin) {
                     // A hosted instrument keeps its sounds and settings in its own editor.
                     ui.label(egui::RichText::new("Load and edit sounds in the plugin's own editor.").color(Tokens::current().text_dim));
@@ -562,6 +563,29 @@ fn plugin_windows(app: &mut SoundApp, ctx: &egui::Context) {
         }
     }
     app.ui.plugin_windows = keep;
+}
+
+fn plugin_routing(app: &mut SoundApp, ui: &mut Ui, track: TrackId, address: usize) {
+    let visual = if address == soundcraft_mix::INSTRUMENT_SLOT { app.engine.session().track(track).and_then(|track| track.instrument_insert_slot()).unwrap_or(0) } else { address };
+    let (sidechain, outputs) = app.player.as_ref().map_or((false, 1), |player| player.plugin_routing_info(track, address));
+    let master = app.engine.session().track(track).is_some_and(|track| track.kind == soundcraft_model::TrackKind::Master);
+    let busses: Vec<_> = app.engine.session().busses.iter().map(|bus| (bus.id, bus.name.clone())).collect();
+    if sidechain && !master {
+        let selected = soundcraft_mix::plugin_sidechain(app.engine.session(), track, visual);
+        let label = busses.iter().find(|(id, _)| Some(*id) == selected).map_or("No key input", |(_, name)| name.as_str());
+        ui.menu_button(format!("Key input: {label}"), |ui| {
+            if ui.button("No key input").clicked() { let _ = app.run("mix.plugin_routing", json!({"track": track.0, "slot": visual, "sidechain": null})); ui.close(); }
+            for (bus, name) in &busses { if ui.button(name).clicked() { let _ = app.run("mix.plugin_routing", json!({"track": track.0, "slot": visual, "sidechain": bus.0})); ui.close(); } }
+        });
+    }
+    for output in 1..outputs {
+        let selected = soundcraft_mix::plugin_output(app.engine.session(), track, visual, output);
+        let label = busses.iter().find(|(id, _)| Some(*id) == selected).map_or("Not routed", |(_, name)| name.as_str());
+        ui.menu_button(format!("Output {}: {label}", output + 1), |ui| {
+            if ui.button("Not routed").clicked() { let _ = app.run("mix.plugin_routing", json!({"track": track.0, "slot": visual, "output": output, "target": null})); ui.close(); }
+            for (bus, name) in &busses { if ui.button(name).clicked() { let _ = app.run("mix.plugin_routing", json!({"track": track.0, "slot": visual, "output": output, "target": bus.0})); ui.close(); } }
+        });
+    }
 }
 
 fn eq_curve(ui: &mut Ui, id: &str, ins: &soundcraft_model::Insert) {
