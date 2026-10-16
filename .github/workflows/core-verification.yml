@@ -32,6 +32,8 @@ jobs:
       - name: Install stable Rust
         run: rustup toolchain install stable --profile minimal
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Run core and UI regressions
         run: cargo +stable test --no-fail-fast --locked --release -p soundcraft-dsp -p soundcraft-model -p soundcraft-engine -p soundcraft-mix -p soundcraft-playback -p soundcraft-ui-egui
       - name: Build desktop binary

@@ -56,7 +56,7 @@ fn the_io_columns_vol_and_pan_readout_is_readable_in_both_themes() {
                 .unwrap_or_else(|| panic!("{mode:?}: no readout behind {:?}", label.galley.job.text));
             let ink = label.override_text_color.unwrap_or(label.galley.job.sections[0].format.color);
             let ratio = contrast(ink, well.fill);
-            assert!(ratio >= 4.5, "{mode:?}: {:?} reads at {ratio:.2}:1", label.galley.job.text);
+            assert!(ratio >= 4.5, "{mode:?}: {:?} reads at {ratio:.2}:1, ink {ink:?}, well {:?}, label {:?}, well rect {:?}", label.galley.job.text, well.fill, label.visual_bounding_rect(), well.rect);
         }
     }
 }

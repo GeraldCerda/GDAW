@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 set -euo pipefail
 
 kit_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -28,13 +29,10 @@ if ! /usr/bin/xcode-select -p >/dev/null 2>&1 || ! /usr/bin/xcrun --find clang >
     exit 2
 fi
 
-if [ -f "$HOME/.cargo/env" ]; then
-    . "$HOME/.cargo/env"
-fi
+export PATH="$HOME/.cargo/bin:$PATH"
 if ! command -v rustup >/dev/null 2>&1; then
     curl --fail --location --retry 3 --proto '=https' --tlsv1.2 https://sh.rustup.rs -o "$kit_dir/rustup-init.sh"
     sh "$kit_dir/rustup-init.sh" -y --profile minimal --default-toolchain stable
-    . "$HOME/.cargo/env"
 fi
 rustup toolchain install stable --profile minimal
 

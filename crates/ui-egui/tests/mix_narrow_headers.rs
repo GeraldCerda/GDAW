@@ -26,7 +26,8 @@ fn painted_labels(narrow: bool) -> Vec<(String, f32, bool)> {
         .shapes
         .iter()
         .filter_map(|s| match &s.shape {
-            Shape::Text(t) if FULL.contains(&t.galley.job.text.as_str()) || SHORT.contains(&t.galley.job.text.as_str()) => {
+            Shape::Text(t) if FULL.contains(&t.galley.job.text.as_str()) || SHORT.contains(&t.galley.job.text.as_str())
+                || matches!(t.galley.job.text.as_str(), "INSTRUMENT" | "INST") => {
                 Some((t.galley.job.text.clone(), t.visual_bounding_rect().width(), t.galley.elided))
             }
             _ => None,

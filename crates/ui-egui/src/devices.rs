@@ -266,7 +266,7 @@ pub fn browser(app: &mut SoundApp, ui: &mut Ui) {
         ui.selectable_value(&mut app.browser.grouping, PluginGrouping::Developer, "Developer");
         ui.selectable_value(&mut app.browser.grouping, PluginGrouping::Effect, "Effect");
     });
-    egui::ComboBox::from_id_salt("browser_plugin_format").label("Format").selected_text(app.browser.format.label()).show_ui(ui, |ui| {
+    egui::ComboBox::new("browser_plugin_format", "Format").selected_text(app.browser.format.label()).show_ui(ui, |ui| {
         for format in [PluginFormat::All, PluginFormat::Vst3, PluginFormat::Au, PluginFormat::Clap, PluginFormat::BuiltIn] {
             ui.selectable_value(&mut app.browser.format, format, format.label());
         }

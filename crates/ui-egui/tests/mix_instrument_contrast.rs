@@ -90,9 +90,7 @@ fn populated_mix_instrument_uses_readable_palette_in_real_frames() {
     app.engine.session_mut().track_mut(empty).unwrap().instrument = None;
     app.ui.window = soundcraft_ui_egui::MainWindow::Mix;
     app.run("view.mix_section", json!({"section": "minimal"})).unwrap();
-    for section in ["inserts_ae"] {
-        app.run("view.mix_section", json!({"section": section})).unwrap();
-    }
+    app.run("view.mix_section", json!({"section": "inserts_ae"})).unwrap();
     let session = app.engine.session().clone();
     assert!(!session.pool.is_empty(), "the fixture must include decoded audio");
     let proof_dir = std::env::var_os("SOUNDCRAFT_MIX_PROOF_DIR").map(std::path::PathBuf::from);
@@ -165,18 +163,20 @@ fn populated_mix_instrument_uses_readable_palette_in_real_frames() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 
-    // Exercise the same painted control's ordinary click/picker path after palette changes.
     let at = slot(harness.output(), "SubSynth").rect.center();
     for pressed in [true, false] {
         harness.input_mut().events.push(Event::PointerButton {
             pos: at,
-            button: egui::PointerButton::Primary,
+            button: egui::PointerButton::Secondary,
             pressed,
             modifiers: Default::default(),
         });
         harness.step();
     }
     harness.step(); // Let the popup finish its initial sizing pass.
+    harness.get_by_label("Instruments").hover();
+    harness.step();
+    harness.step();
     harness.get_by_label("GDAW ⏵").hover();
     harness.step();
     harness.step();
@@ -191,7 +191,7 @@ fn populated_mix_instrument_uses_readable_palette_in_real_frames() {
     }
     assert_eq!(app.engine.session().edit.selected_tracks, session.edit.selected_tracks);
     assert_eq!(app.engine.session().pool, session.pool);
-    assert!(app.ui.plugin_windows.is_empty(), "a built-in instrument opens its picker");
+    assert!(app.ui.plugin_windows.is_empty(), "changing an insert uses its context menu");
     harness.state_mut().run("edit.undo", json!({})).unwrap();
     assert_eq!(harness.state().engine.session(), &session);
 }
