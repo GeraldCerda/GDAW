@@ -621,14 +621,25 @@ pub fn plugin_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, oc
         run_pick(app, ui, "mix.insert", json!({"track": id.0, "slot": slot, "plugin": plugin}));
     }
     if app.engine.session().track(id).is_some_and(|track| track.kind == TrackKind::Instrument) {
-        ui.menu_button("Instruments", |ui| instrument_menu(app, ui, id, slot));
+        ui.menu_button("Instruments", |ui| instrument_menu_at(app, ui, id, slot));
     }
 }
 
 /// The instrument picker of an instrument track: a search field that takes typing at once, then
 /// (until something is typed) its instrument's editor and the built-in, CLAP, VST3 and Audio Units
 /// instruments.
-pub fn instrument_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, visual: usize) {
+pub fn instrument_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
+    let visual = app.engine.session().track(id).and_then(|track| {
+        track.instrument_insert_slot().or_else(|| track.mixer.inserts.iter().position(Option::is_none))
+    });
+    let Some(visual) = visual else {
+        ui.label("All insert slots are in use");
+        return;
+    };
+    instrument_menu_at(app, ui, id, visual);
+}
+
+fn instrument_menu_at(app: &mut SoundApp, ui: &mut Ui, id: TrackId, visual: usize) {
     crate::devices::prepare_plugins(app);
     let slot = soundcraft_mix::INSTRUMENT_SLOT;
     let search = MenuSearch::show(ui, egui::Id::new(("instrument-search", id.0)), "Search instruments…");

@@ -1,6 +1,8 @@
 use concurrent_queue::ConcurrentQueue;
 use std::sync::Arc;
-use std::sync::mpsc::{SendError, TryRecvError, TrySendError};
+use std::sync::mpsc::{SendError, TryRecvError};
+#[cfg(test)]
+use std::sync::mpsc::TrySendError;
 
 pub struct Sender<T>(Arc<ConcurrentQueue<T>>);
 pub struct Receiver<T>(Arc<ConcurrentQueue<T>>);
@@ -22,6 +24,7 @@ impl<T> Sender<T> {
         self.0.push(value).map_err(|error| SendError(error.into_inner()))
     }
 
+    #[cfg(test)]
     pub fn try_send(&self, value: T) -> Result<(), TrySendError<T>> {
         self.0.push(value).map_err(|error| TrySendError::Full(error.into_inner()))
     }
