@@ -1,35 +1,35 @@
-GDAW Mac Test Kit v5.1
+GDAW Mac Test Kit v6
 
-Source revision: 716fe4be7737e9efbfe5c7ef03a3a5d724c946c9
+Source revision: 964ecaa999ad8feb17bce77c3830005ba1e4b656
 Repository: https://github.com/GeraldCerda/GDAW
 
-This is an uncompiled diagnostic test candidate. Architecture hardening remains incomplete. No binary, application, installer, compiler or regression suite was run while preparing this download.
+Verified on Apple Silicon macOS with Rust 1.99.1:
+- Native arm64 desktop executable: normal locked release build, deployment target 11.0, zero compiler errors or warnings.
+- Complete DSP, model, engine, mix, playback and UI regression suites: 819 passed, 0 failed, 0 ignored, across 87 result targets.
+- Regression executables use release optimization with test-only link-time optimization disabled. The application keeps its normal release link settings.
+- Packaging lint passed.
 
-Extract this kit into ~/Downloads/GDAW_Test_Kit, replacing its three kit files. Existing source folders, logs, settings and Cargo caches can remain.
+Build result:
+https://github.com/GeraldCerda/GDAW/actions/runs/38855525806
+Regression result:
+https://github.com/GeraldCerda/GDAW/actions/runs/38855525758
+Full failure audit and remaining untested areas:
+https://github.com/GeraldCerda/GDAW/blob/main/docs/GDAW_BUILD_FAILURE_AUDIT_2026-10-16.md
 
-Build, run the regression suites, then install and launch:
+Replace the three kit files in ~/Downloads/GDAW_Test_Kit. Existing source folders, logs, settings and Cargo caches can remain.
+
+Build, install and launch the verified source:
+bash "$HOME/Downloads/GDAW_Test_Kit/build_test.sh"
+
+The automated regression suites have already passed in CI. To repeat all six suites locally before installation:
 bash "$HOME/Downloads/GDAW_Test_Kit/build_test.sh" --verify
 
-The full verification option runs the DSP, model, engine, mix, playback and UI suites. A failed compilation or test stops before replacing the installed tester. Formatting differences are recorded separately. The --verify-ui option checks only UI tests and is insufficient for this architecture pass. Running without a verification option builds and installs without running tests.
+Both verification options disable link-time optimization for test executables only, matching CI and avoiding repeated whole-program optimization for dozens of tests. The application build retains its normal release configuration. A failed compilation or test still stops installation. Formatting differences are recorded separately. --verify-ui runs only UI tests and is insufficient for a complete core regression pass.
 
-The script checks Apple Command Line Tools, installs or updates Rust when needed, downloads the pinned GitHub source, builds the native Mac application and signs it locally. It installs GDAW Test.app in ~/Applications and keeps a previous tester as a timestamped backup. Test settings remain in ~/Library/Application Support/GDAW Test. Build and launch logs remain in this kit's logs directory.
+The script checks Apple Command Line Tools, installs or updates Rust when needed, downloads the exact pinned source, builds the native application and signs it locally. It installs GDAW Test.app in ~/Applications and keeps a previous tester as a timestamped backup. Test settings remain in ~/Library/Application Support/GDAW Test. Logs remain in this kit's logs directory.
 
-Build-log correction in v5.1:
-- Restore the three-argument instrument-menu entry point used by the Edit header while retaining explicit insert-slot selection.
-- Restrict the test-only mailbox try_send method and its import to test builds.
-- This addresses the reported E0061 compilation error and unused-method warning. A successful build or regression result is not yet established.
+The CI build did not launch the application, create or install an app bundle, or exercise physical audio hardware. Installation, signing, interactive use on your Mac, Apollo input/output and recording, device-clock drift, hosted plugins and real-time deadlines still need validation. This is not a production-readiness certification.
 
-Source changes included:
-- Prepared mixer/session handoffs, coalesced control-thread updates, bounded command mailboxes and deferred state reclamation.
-- Prepared delay storage, preserved compatible histories and 128-frame transitions between delay taps.
-- Per-sample plugin automation fallback, transitive aux solo, routing diagnostics and bus-targeted master processing.
-- Monitoring drift correction and underflow accounting.
-- Fader Touch return ramps.
-- AudioSuite media staging before session publication, with before/ready recovery snapshots.
-- Instruments presented through ordinary insert cells and the bottom device chain.
+Architecture work remains incomplete: complete parameter Touch/Latch gestures and native hosted automation events; timestamp-driven capture alignment; remaining callback/plugin lifecycle and streaming work; delay-capacity replenishment; AudioSuite recovery, partial-selection/crossfaded replacement and media ownership; instrument DSP ordering and overflow presentation. See the linked audit for the exact verification limits.
 
-After compilation and regression checks pass, test with a disposable copy of a session. Check playback/stop/seek, interface input and recording, a short bounce, automation, aux routing, insert changes, instrument selection, and AudioSuite undo/save/reopen. Keep the build or launch log if anything fails.
-
-Remaining implementation includes timestamp-based recording alignment, complete parameter gesture semantics, native hosted automation events, automatic delay-capacity replenishment, plugin lifecycle and streaming work, automatic AudioSuite recovery and partial-selection replacements, and instrument DSP ordering/overflow presentation. Hosted plugin behavior, PDC transitions, UI interaction and all hardware/platform behavior remain unvalidated.
-
-See docs/GDAW_CORE_CONTINUATION_2026-10-15.md in the downloaded source for the detailed changes, limitations and unperformed checks.
+Use a disposable session copy for playback/stop/seek, recording, short bounce, automation, aux routing, insert/instrument changes and AudioSuite undo/save/reopen. Keep the build or launch log if anything fails.

@@ -124,3 +124,9 @@ Next source work: full parameter gesture state machine; native hosted automation
 
 Tester source pin remains e1d692457d1ae0050e3f5fb3e9fda1472552cf54. No tester packaging or installer file is changed. No new tester is requested or advertised.
 
+Verification update — 2026-10-16 UTC
+-----------------------------------
+
+Revision 964ecaa999ad8feb17bce77c3830005ba1e4b656 now passes the complete six-package DSP/model/engine/mix/playback/UI regression run (819 passed, none failed or ignored) and the normal Apple Silicon release desktop build, both with zero compiler warnings/errors. Regression executables use test-only LTO disabled; the desktop application retains its normal release link settings. The historical uncompiled/untested statements above describe preparation of the earlier checkpoint, not the present verification result.
+
+Read [GDAW_BUILD_FAILURE_AUDIT_2026-10-16.md](GDAW_BUILD_FAILURE_AUDIT_2026-10-16.md) for every original failure, the exact commands/results and all unperformed checks. Application launch/installation, hardware and real hosted plugins remain unvalidated. The remaining architecture implementation items above are still incomplete. The tester was updated only after source review, independent GitHub verification and the passing results, following the user's request for another tester.
