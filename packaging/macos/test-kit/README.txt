@@ -1,6 +1,6 @@
-GDAW Mac Test Kit v5
+GDAW Mac Test Kit v5.1
 
-Source revision: e253e1a612f46cacb9397c3e628403cc6db809a5
+Source revision: 716fe4be7737e9efbfe5c7ef03a3a5d724c946c9
 Repository: https://github.com/GeraldCerda/GDAW
 
 This is an uncompiled diagnostic test candidate. Architecture hardening remains incomplete. No binary, application, installer, compiler or regression suite was run while preparing this download.
@@ -13,6 +13,11 @@ bash "$HOME/Downloads/GDAW_Test_Kit/build_test.sh" --verify
 The full verification option runs the DSP, model, engine, mix, playback and UI suites. A failed compilation or test stops before replacing the installed tester. Formatting differences are recorded separately. The --verify-ui option checks only UI tests and is insufficient for this architecture pass. Running without a verification option builds and installs without running tests.
 
 The script checks Apple Command Line Tools, installs or updates Rust when needed, downloads the pinned GitHub source, builds the native Mac application and signs it locally. It installs GDAW Test.app in ~/Applications and keeps a previous tester as a timestamped backup. Test settings remain in ~/Library/Application Support/GDAW Test. Build and launch logs remain in this kit's logs directory.
+
+Build-log correction in v5.1:
+- Restore the three-argument instrument-menu entry point used by the Edit header while retaining explicit insert-slot selection.
+- Restrict the test-only mailbox try_send method and its import to test builds.
+- This addresses the reported E0061 compilation error and unused-method warning. A successful build or regression result is not yet established.
 
 Source changes included:
 - Prepared mixer/session handoffs, coalesced control-thread updates, bounded command mailboxes and deferred state reclamation.
