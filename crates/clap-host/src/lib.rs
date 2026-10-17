@@ -247,3 +247,17 @@ pub fn set_bundle_scanner(scanner: fn(&Path) -> Result<Vec<ClapDescriptor>, Clap
     #[cfg(target_arch = "wasm32")]
     let _ = scanner;
 }
+
+pub fn restore_catalog(descriptors: Vec<ClapDescriptor>) {
+    #[cfg(not(target_arch = "wasm32"))]
+    registry::restore_catalog(descriptors);
+    #[cfg(target_arch = "wasm32")]
+    let _ = descriptors;
+}
+
+pub fn retry_plugin(id: &str) {
+    #[cfg(not(target_arch = "wasm32"))]
+    registry::retry_plugin(id);
+    #[cfg(target_arch = "wasm32")]
+    let _ = id;
+}

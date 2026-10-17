@@ -12,6 +12,7 @@ pub mod clip_group_file;
 pub mod cmd;
 pub mod demo;
 pub mod edit;
+pub mod exchange;
 pub mod file_access;
 pub mod inspect;
 pub mod io;
@@ -356,7 +357,9 @@ impl Engine {
                     || !before.tracks.iter().zip(&self.doc.tracks).all(|(old, new)| old.id == new.id && old.kind == new.kind
                         && old.inactive == new.inactive && old.mixer.input == new.mixer.input && old.mixer.output == new.mixer.output
                         && old.mixer.sends.iter().map(|send| send.as_ref().map(|send| &send.target)).eq(new.mixer.sends.iter().map(|send| send.as_ref().map(|send| &send.target))))
-                    || before.tracks.len() != self.doc.tracks.len();
+                    || before.tracks.len() != self.doc.tracks.len()
+                    || !before.edit.values.iter().filter(|(key, _)| key.starts_with("plugin_sidechain.") || key.starts_with("plugin_output."))
+                        .eq(self.doc.edit.values.iter().filter(|(key, _)| key.starts_with("plugin_sidechain.") || key.starts_with("plugin_output.")));
                 if !routes_changed { return Ok(value); }
                 let previous = soundcraft_mix::routing_diagnostics(&before);
                 if let Some((track, problem)) = soundcraft_mix::routing_diagnostics(&self.doc).into_iter().find(|issue| !previous.contains(issue)) {
@@ -553,3 +556,5 @@ mod dirty_tests {
     }
 }
 
+
+pub(crate) mod insert_drag;

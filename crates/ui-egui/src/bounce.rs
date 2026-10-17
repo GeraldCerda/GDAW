@@ -7,7 +7,7 @@ use serde_json::Value;
 
 /// Starts the bounce `file.bounce_mix` runs for `params`; [`step`] renders it.
 pub fn start(app: &mut SoundApp, params: &Value) {
-    if app.bounce.is_some() {
+    if app.bounce.is_some() || app.exchange.is_some() {
         app.ui.status = "A bounce is already running".into();
         return;
     }
@@ -22,6 +22,14 @@ pub fn start(app: &mut SoundApp, params: &Value) {
 /// Renders the running bounce for a moment. Called from `logic`, which eframe keeps calling while
 /// the window is hidden as long as a repaint is requested, so a bounce doesn't pause then.
 pub fn step(app: &mut SoundApp, ctx: &egui::Context) {
+    if let Some(job) = &mut app.exchange {
+        match job.step(slice()) {
+            Ok(None) => { ctx.request_repaint(); return; }
+            Ok(Some(result)) => app.ui.status = format!("Exported {}", result["directory"].as_str().unwrap_or("the session")),
+            Err(error) => app.ui.status = error.to_string(),
+        }
+        app.exchange = None;
+    }
     let Some(job) = &mut app.bounce else { return };
     app.ui.status = match job.step(slice()) {
         Ok(None) => {
@@ -39,10 +47,10 @@ pub fn step(app: &mut SoundApp, ctx: &egui::Context) {
 /// Refuses to replace the session while a bounce holds its own copy: two large sessions could run
 /// out of memory. True when refused; the status line says why.
 pub fn refuses_session_switch(app: &mut SoundApp) -> bool {
-    if app.bounce.is_some() {
-        app.ui.status = "Finish or cancel the bounce first".into();
+    if app.bounce.is_some() || app.exchange.is_some() {
+        app.ui.status = "Finish or cancel the export first".into();
     }
-    app.bounce.is_some()
+    app.bounce.is_some() || app.exchange.is_some()
 }
 
 /// Whether to render another block in this call: for 30 ms.
@@ -64,6 +72,18 @@ fn slice() -> impl FnMut() -> bool {
 
 /// Shows how far the running bounce got, with Cancel (or Esc).
 pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
+    if let Some(job) = &app.exchange {
+        let mut cancel = false;
+        egui::Modal::new(egui::Id::new("exchange_progress")).show(ctx, |ui| {
+            ui.set_width(340.0);
+            ui.strong("Exporting WAV tracks and MIDI");
+            ui.label(job.path().file_name().unwrap_or_default().to_string_lossy());
+            ui.add(egui::ProgressBar::new(job.progress()).show_percentage());
+            cancel = ui.button("Cancel").clicked() || ctx.input(|input| input.key_pressed(egui::Key::Escape));
+        });
+        if cancel { app.exchange = None; app.ui.status = "Export cancelled".into(); }
+        return;
+    }
     let Some(job) = &app.bounce else { return };
     let mut cancel = ctx.input(|i| i.key_pressed(egui::Key::Escape));
     egui::Modal::new(egui::Id::new("bounce_progress")).show(ctx, |ui| {

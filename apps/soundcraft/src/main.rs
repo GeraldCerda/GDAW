@@ -108,7 +108,7 @@ impl eframe::App for App {
 
 fn open_path(app: &mut SoundApp, p: &str) {
     let lower = p.to_ascii_lowercase();
-    let r = if lower.ends_with(".scraft") {
+    let r = if soundcraft_engine::io::is_session_path(&lower) {
         dialogs::run_or_ask(app, "session.open", serde_json::json!({"path": p}))
     } else if lower.ends_with(".mid") || lower.ends_with(".midi") || lower.ends_with(".smf") {
         app.run("file.import_midi", serde_json::json!({"path": p}))
@@ -165,7 +165,7 @@ fn services() -> Services {
         pick_open: Some(Box::new(|purpose: &str, _exts: &[&str]| {
             let d = rfd::FileDialog::new();
             let d = match purpose {
-                "session.open" => d.add_filter("SoundCraft Session", &["scraft"]),
+                "session.open" => d.add_filter("GDAW Session / Project", &["gdaw", "gdawz", "scraft", "scraftz"]),
                 "file.import_midi" => d.add_filter("MIDI", &["mid", "midi", "smf"]),
                 _ => d.add_filter(
                     "Audio",
@@ -178,7 +178,12 @@ fn services() -> Services {
             let path = std::path::Path::new(default);
             let mut d = match purpose {
                 "file.bounce_mix" => rfd::FileDialog::new().add_filter("Audio", &["wav", "aif", "aiff", "flac"]),
-                _ => rfd::FileDialog::new().add_filter("SoundCraft Session", &["scraft"]),
+                "file.export_project" => rfd::FileDialog::new().add_filter("Portable GDAW Project", &["gdawz"]),
+                "file.export_midi" => rfd::FileDialog::new().add_filter("Standard MIDI File", &["mid"]),
+                "file.export_session_text" => rfd::FileDialog::new().add_filter("Session Information", &["txt"]),
+                "file.export_sibelius" | "file.send_to_sibelius" => rfd::FileDialog::new().add_filter("MusicXML", &["musicxml"]),
+                "file.print_score" => rfd::FileDialog::new().add_filter("SVG Score", &["svg"]),
+                _ => rfd::FileDialog::new().add_filter("GDAW Session", &["gdaw", "gdawz", "scraft", "scraftz"]),
             };
             if let Some(dir) = path.parent().filter(|dir| dir.is_dir()) {
                 d = d.set_directory(dir);

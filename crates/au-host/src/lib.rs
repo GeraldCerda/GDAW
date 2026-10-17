@@ -158,7 +158,7 @@ pub fn split_component_name(full: &str) -> (String, String) {
 }
 
 /// One Audio Unit found by a scan.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AuDescriptor {
     /// SoundCraft id: `au:<type>:<subtype>:<manufacturer>`.
     pub id: String,
@@ -350,4 +350,25 @@ mod tests {
         assert!(plugin_info(missing).is_none());
         assert!(instantiate(missing).is_err());
     }
+}
+
+pub fn restore_catalog(descriptors: Vec<AuDescriptor>) {
+    #[cfg(target_os = "macos")]
+    registry::restore_catalog(descriptors);
+    #[cfg(not(target_os = "macos"))]
+    let _ = descriptors;
+}
+
+pub fn retry_plugin(id: &str) {
+    #[cfg(target_os = "macos")]
+    registry::retry_plugin(id);
+    #[cfg(not(target_os = "macos"))]
+    let _ = id;
+}
+
+pub fn cached() -> Option<Vec<AuDescriptor>> {
+    #[cfg(target_os = "macos")]
+    { registry::cached() }
+    #[cfg(not(target_os = "macos"))]
+    { Some(Vec::new()) }
 }

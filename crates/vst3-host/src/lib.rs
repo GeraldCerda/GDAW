@@ -336,3 +336,17 @@ pub fn set_bundle_scanner(scanner: fn(&Path) -> Result<Vec<Vst3Descriptor>, Vst3
     #[cfg(target_arch = "wasm32")]
     let _ = scanner;
 }
+
+pub fn restore_catalog(descriptors: Vec<Vst3Descriptor>) {
+    #[cfg(not(target_arch = "wasm32"))]
+    registry::restore_catalog(descriptors);
+    #[cfg(target_arch = "wasm32")]
+    let _ = descriptors;
+}
+
+pub fn retry_plugin(id: &str) {
+    #[cfg(not(target_arch = "wasm32"))]
+    registry::retry_plugin(id);
+    #[cfg(target_arch = "wasm32")]
+    let _ = id;
+}

@@ -76,6 +76,7 @@ pub const UI_COMMANDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("ui.set", "Set UI State", "", None),
     ("ui.theme", "Appearance", "", None),
     ("ui.drum_library", "Drum Sample Library", "", None),
+    ("window.developer_api", "Developer API", "Help > Developer API", None),
 ];
 
 /// Extra catalog mappings handled by the UI layer.
@@ -206,6 +207,9 @@ pub fn tree() -> Vec<MenuNode> {
     }
     insert_path(&mut roots, "Window > Reset Panel Layout");
     insert_path(&mut roots, "Setup > Routing Diagnostics");
+    insert_path(&mut roots, "File > Export > Portable GDAW Project...");
+    insert_path(&mut roots, "File > Export > WAV Tracks and MIDI...");
+    insert_path(&mut roots, "Help > Developer API");
     // Not in the incumbent catalog, but the only UI path to an empty MIDI clip (#282).
     // It creates a clip rather than acting on the selected ones, so it leads the Clip menu.
     insert_path(&mut roots, "Clip > New MIDI Clip");
@@ -481,6 +485,10 @@ fn wants_dialog(id: &str) -> bool {
 
 /// Handle UI-layer commands. Returns None when `id` is not a UI command.
 pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<Value, String>> {
+    if id == "window.developer_api" {
+        app.ui.show_developer_api = p.get("value").and_then(Value::as_bool).unwrap_or(!app.ui.show_developer_api);
+        return Some(Ok(json!({"visible": app.ui.show_developer_api})));
+    }
     if matches!(id, "ui.dock" | "ui.dock.reset") {
         return Some(crate::docking::command(app, id == "ui.dock.reset", p));
     }

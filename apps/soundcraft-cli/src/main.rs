@@ -97,7 +97,7 @@ fn main() -> ExitCode {
 
 fn info(args: &[String]) -> ExitCode {
     let Some(path) = args.first() else { return fail("info FILE") };
-    if path.ends_with(".scraft") {
+    if soundcraft_engine::io::is_session_path(path) {
         let mut e = Engine::default();
         match soundcraft_engine::io::open_session(&mut e, path) {
             Ok(missing) => warn_missing(&missing),

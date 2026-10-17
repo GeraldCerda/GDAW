@@ -256,6 +256,33 @@ pub fn decode(bytes: &[u8], ext_hint: Option<&str>) -> Result<(AudioInfo, AudioB
     }
 }
 
+fn preview_frames(info: &AudioInfo, seconds: u32) -> u64 {
+    u64::from(info.sample_rate).saturating_mul(u64::from(seconds.clamp(1, 60))).min(16_777_216 / u64::from(info.channels.max(1)))
+}
+
+pub fn decode_preview(bytes: &[u8], ext_hint: Option<&str>, seconds: u32) -> Result<(AudioInfo, AudioBuffer)> {
+    let format = detect_format(bytes, ext_hint);
+    match format {
+        FileFormat::Wav if wav::is_wav(bytes) => match wav::parse(bytes)? {
+            wav::WavParse::Native(mut layout) => {
+                layout.info.frames = layout.info.frames.min(preview_frames(&layout.info, seconds));
+                let buffer = wav::decode(bytes, &layout)?;
+                Ok((layout.info, buffer))
+            }
+            wav::WavParse::Foreign { .. } => symph::decode_preview(bytes, format, seconds),
+        },
+        FileFormat::Aiff if aiff::is_aiff(bytes) => match aiff::parse(bytes)? {
+            aiff::AiffParse::Native(mut layout) => {
+                layout.info.frames = layout.info.frames.min(preview_frames(&layout.info, seconds));
+                let buffer = aiff::decode(bytes, &layout)?;
+                Ok((layout.info, buffer))
+            }
+            aiff::AiffParse::Foreign => symph::decode_preview(bytes, format, seconds),
+        },
+        _ => symph::decode_preview(bytes, format, seconds),
+    }
+}
+
 /// Encode `buf` as WAV/BWF, AIFF/AIFF-C or FLAC. Samples are clamped to [-1, 1].
 pub fn encode(buf: &AudioBuffer, opts: &EncodeOptions) -> Result<Vec<u8>> {
     match opts.format {
@@ -361,4 +388,22 @@ pub fn wav_float_header(channels: usize, sample_rate: u32, frames: u64) -> Resul
         return Err(AudioError::Encode("a WAV needs channels and a sample rate".into()));
     }
     wav::header(channels, sample_rate, (32, true), None, None, frames, false)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod preview_tests {
+    use super::*;
+
+    #[test]
+    fn native_and_compressed_previews_stop_at_the_requested_duration() {
+        let audio = AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.25; 96_000]] };
+        for format in [FileFormat::Wav, FileFormat::Flac] {
+            let options = EncodeOptions { format, bit_depth: BitDepth::Int24, dither: false, bwf: None };
+            let bytes = encode(&audio, &options).unwrap();
+            let (_, preview) = decode_preview(&bytes, None, 1).unwrap();
+            assert_eq!(preview.frames(), 48_000);
+            assert!((preview.channels[0][24_000] - 0.25).abs() < 1e-5);
+        }
+    }
 }

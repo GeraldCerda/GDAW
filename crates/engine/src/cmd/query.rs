@@ -6,6 +6,8 @@ use serde_json::json;
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
+        cmd!(query "engine.capabilities", "GDAW Capabilities", [], None, "{}", always, |_, _| Ok(json!({"application": "GDAW", "api_version": 1, "session_schema_version": soundcraft_model::Session::FORMAT_VERSION, "native_session": "gdaw", "portable_project": "gdawz", "legacy_sessions": ["scraft", "scraftz"], "audio_exports": ["wav", "aiff", "flac"], "interchange": ["aligned WAV tracks", "Standard MIDI", "JSON manifest"], "plugin_formats": ["VST3", "CLAP", "AUv2 on macOS"], "developer_control": ["desktop localhost JSON Lines (opt-in)", "CLI", "MCP"], "command_discovery": "engine.commands", "native_document": "session.document", "unsupported_session_interchange": ["PTX", "ALS", "AAF", "OMF"], "license_status": "Host-reported failures and user exclusions; no universal iLok license introspection"}))),
+        cmd!(query "session.document", "Native Session Document", [], None, "{} — versioned JSON document; audio is referenced separately", always, |e, _| serde_json::to_value(e.session()).map_err(|error| EngineError::Io(error.to_string()))),
         cmd!(query "session.inspect", "Inspect Session", [], None, "{detail?: summary|full}", always, |e, p| Ok(crate::inspect::session(e, str_param(p, "detail") == Some("full")))),
         cmd!(query "track.inspect", "Inspect Track", [], None, "{track}", has_tracks, |e, p| {
             let t = track_param(e, "track.inspect", p, "track")?.ok_or_else(|| bad("track.inspect", "`track` required"))?;

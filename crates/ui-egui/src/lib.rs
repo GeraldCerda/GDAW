@@ -22,6 +22,8 @@ pub mod palette;
 pub mod panels;
 pub mod plugin_browser;
 pub mod plugin_scan;
+mod sample_browser;
+mod developer_panel;
 mod parameter_automation;
 mod recent;
 pub mod recovery;
@@ -125,6 +127,11 @@ pub struct UiState {
     pub video_burn_in: bool,
     pub workspace_dir: String,
     pub drum_library: String,
+    pub sample_folders: Vec<String>,
+    pub sample_favorites: Vec<String>,
+    pub recent_samples: Vec<String>,
+    pub auto_preview_samples: bool,
+    pub show_developer_api: bool,
     #[serde(default)]
     pub appearance_revision: u8,
     #[serde(default)]
@@ -194,6 +201,11 @@ impl Default for UiState {
             video_burn_in: false,
             workspace_dir: String::new(),
             drum_library: String::new(),
+            sample_folders: Vec::new(),
+            sample_favorites: Vec::new(),
+            recent_samples: Vec::new(),
+            auto_preview_samples: true,
+            show_developer_api: false,
             appearance_revision: 1,
             insert_views_revision: 1,
             configurations: Vec::new(),
@@ -351,6 +363,7 @@ pub struct SoundApp {
     pub video: video_track::VideoPool,
     /// The Bounce Mix in progress, rendered a slice per frame.
     pub bounce: Option<soundcraft_engine::io::Bounce>,
+    pub exchange: Option<soundcraft_engine::exchange::Exchange>,
     /// Test-only: owns the process-wide palette lock while this app exists, so frames painted
     /// and colour assertions in one test can never straddle another test's palette change.
     #[cfg(test)]
@@ -434,6 +447,7 @@ impl SoundApp {
             last_meter_poll: f64::NEG_INFINITY,
             video: video_track::VideoPool::default(),
             bounce: None,
+            exchange: None,
             #[cfg(test)]
             _palette_lock: theme::lock_test_palette(),
         }
@@ -481,14 +495,31 @@ impl SoundApp {
         if let Some(r) = menus::run_ui_command(self, id, &params) {
             return r;
         }
-        if id.starts_with("session.save") || id.starts_with("file.bounce") {
+        if id.starts_with("session.save") || id.starts_with("file.bounce") || matches!(id, "mix.insert_move" | "file.export_project" | "file.export_exchange") {
             // Third-party plugins keep state the session can't see: store it first.
             self.capture_plugin_states();
+        }
+        if id == "file.export_exchange" {
+            if self.exchange.is_some() || self.bounce.is_some() { return Err("Finish or cancel the running export first".into()); }
+            return match soundcraft_engine::exchange::Exchange::new(&self.engine, &params) {
+                Ok(job) => { self.exchange = Some(job); Ok(serde_json::json!({"started": true})) }
+                Err(error) => { self.ui.status = error.to_string(); Err(error.to_string()) }
+            };
         }
         let replacing = matches!(id, "session.new" | "session.open" | "session.close" | "session.revert");
         match self.engine.execute(id, &params) {
             Ok(v) => {
-                if replacing { self.parameter_automation = parameter_automation::ParameterAutomation::default(); }
+                if id == "mix.insert_move" {
+                    let reset: Vec<_> = v.get("reset").and_then(Value::as_array).into_iter().flatten().filter_map(|entry| {
+                        let track = TrackId(entry["track"].as_u64()?);
+                        let slot = if entry["instrument"].as_bool() == Some(true) { soundcraft_mix::INSTRUMENT_SLOT } else { usize::try_from(entry["slot"].as_u64()?).ok()? };
+                        Some((track, slot))
+                    }).collect();
+                    if let Some(player) = &self.player { player.invalidate_plugin_slots(&reset); }
+                    self.ui.plugin_windows.retain(|window| !reset.contains(window));
+                    self.show_insert_result(&v);
+                }
+                if replacing { crate::sample_browser::stop(self); self.parameter_automation = parameter_automation::ParameterAutomation::default(); }
                 if replacing || (id.starts_with("session.save") && !self.engine.is_dirty()) {
                     self.release_autosave(false);
                 }
@@ -518,6 +549,11 @@ impl SoundApp {
                 Ok(v)
             }
             Err(e) => {
+                if matches!(id, "mix.insert" | "mix.instrument") {
+                    if let Some(plugin) = params.get("plugin").and_then(Value::as_str).filter(|plugin| soundcraft_mix::is_third_party(plugin)) {
+                        if crate::mix_window::plugin_info(plugin).is_none() { crate::devices::exclude_plugin(self, plugin, "Could not load this plugin. Check authorization or compatibility, then retry from Unavailable / hidden."); }
+                    }
+                }
                 self.ui.status = e.to_string();
                 log::warn!("{id}: {e}");
                 Err(e.to_string())
@@ -1338,6 +1374,7 @@ impl SoundApp {
         }
         crate::devices::prepare_drum_library(self);
         crate::devices::prepare_plugins(self);
+        crate::sample_browser::poll(self, ctx);
         let light = theme::wants_light(ctx, self.ui.theme);
         if self.theme_applied != Some(light) || theme::is_light() != light {
             theme::apply(ctx, light);
@@ -1375,7 +1412,7 @@ impl SoundApp {
         let position = self.position();
         let playing = self.is_playing();
         self.parameter_automation.step(&mut self.engine, position, playing, ctx.input(|input| input.pointer.any_down()), gestures);
-        if self.engine.revision != self.last_rev {
+        if self.engine.revision != self.last_rev && !(self.browser.startup_scan && self.browser.plugin_scan.is_some()) {
             self.last_rev = self.engine.revision;
             if let Some(p) = &self.player {
                 p.update_session(self.engine.session_arc());
@@ -1439,6 +1476,7 @@ impl SoundApp {
             return;
         }
         if crate::devices::startup(self, ui) { return; }
+        crate::developer_panel::show(self, ctx);
         if self.arrange_request {
             self.arrange_request = false;
             ctx.memory_mut(|m| m.reset_areas());

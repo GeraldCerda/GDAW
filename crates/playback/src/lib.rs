@@ -62,7 +62,9 @@ pub type EditorEdit = (TrackId, usize, String, f32);
 enum Cmd {
     Ready(Box<PreparedPlayback>),
     ReadyInput(Box<PreparedInput>),
-    Reclaim(Sender<Box<PreparedPlayback>>, Sender<Box<PreparedInput>>),
+    Reclaim(Sender<Box<PreparedPlayback>>, Sender<Box<PreparedInput>>, Sender<Arc<soundcraft_model::SourceAudio>>),
+    Preview(Option<Arc<soundcraft_model::SourceAudio>>),
+    PreviewGain(f32),
     /// A new snapshot plus the third-party instances it needs (created on the UI thread).
     #[cfg(test)]
     Session(Arc<Session>, Vec<PreparedInstance>),
@@ -314,6 +316,11 @@ struct AudioState {
     old_input: Option<Box<PreparedInput>>,
     input_retirement: Option<Sender<Box<PreparedInput>>>,
     pending_garbage: Option<Vec<Box<dyn Plugin>>>,
+    preview: Option<Arc<soundcraft_model::SourceAudio>>,
+    old_preview: Option<Arc<soundcraft_model::SourceAudio>>,
+    preview_retirement: Option<Sender<Arc<soundcraft_model::SourceAudio>>>,
+    preview_position: f64,
+    preview_gain: f32,
 }
 
 fn new_engine(sr: f32) -> MixEngine {
@@ -337,6 +344,11 @@ impl AudioState {
             old_input: None,
             input_retirement: None,
             pending_garbage: None,
+            preview: None,
+            old_preview: None,
+            preview_retirement: None,
+            preview_position: 0.0,
+            preview_gain: 0.25,
             fold: fold_gains(&session),
             rx,
             shared,
@@ -369,10 +381,21 @@ impl AudioState {
                 if let Err(error) = sender.send(old) { self.old_input = Some(error.0); return; }
             } else { self.old_input = Some(old); return; }
         }
+        if let Some(old) = self.old_preview.take() {
+            if let Some(sender) = &self.preview_retirement {
+                if let Err(error) = sender.send(old) { self.old_preview = Some(error.0); return; }
+            } else { self.old_preview = Some(old); return; }
+        }
         for _ in 0..64 {
             let Ok(c) = self.rx.try_recv() else { break };
             match c {
-                Cmd::Reclaim(states, inputs) => { self.retirement = Some(states); self.input_retirement = Some(inputs); }
+                Cmd::Reclaim(states, inputs, previews) => { self.retirement = Some(states); self.input_retirement = Some(inputs); self.preview_retirement = Some(previews); }
+                Cmd::Preview(preview) => {
+                    self.old_preview = std::mem::replace(&mut self.preview, preview);
+                    self.preview_position = 0.0;
+                    break;
+                }
+                Cmd::PreviewGain(gain) => self.preview_gain = if gain.is_finite() { gain.clamp(0.0, 1.0) } else { 0.25 },
                 Cmd::ReadyInput(mut prepared) => {
                     std::mem::swap(&mut self.input, &mut prepared.ring);
                     std::mem::swap(&mut self.mix.input, &mut prepared.buffer);
@@ -521,6 +544,31 @@ impl AudioState {
     }
 
     /// Fill an interleaved device buffer.
+    fn fill_preview(&mut self, output: &mut [f32], channels: usize) {
+        let Some(audio) = &self.preview else { return };
+        let frames = audio.frames();
+        if frames == 0 || audio.buffer.channels.is_empty() { return; }
+        let rate = f64::from(audio.buffer.sample_rate.max(1));
+        let step = rate / self.device_rate.max(1.0);
+        let fade = (rate * 0.005).max(1.0);
+        let first = self.session.outputs.first().map_or(0, |path| usize::from(path.first_channel));
+        for frame in output.chunks_mut(channels.max(1)) {
+            let index = self.preview_position.floor() as usize;
+            if index >= frames { break; }
+            let fraction = (self.preview_position - index as f64) as f32;
+            let envelope = (self.preview_position / fade).min((frames.saturating_sub(index)) as f64 / fade).clamp(0.0, 1.0) as f32;
+            for channel in 0..2 {
+                let Some(destination) = frame.get_mut(first.saturating_add(channel)) else { continue };
+                let Some(source) = audio.buffer.channels.get(channel.min(audio.buffer.channels.len() - 1)) else { continue };
+                let a = source.get(index).copied().unwrap_or(0.0);
+                let b = source.get(index.saturating_add(1)).copied().unwrap_or(a);
+                let sample = (a + (b - a) * fraction) * envelope * self.preview_gain;
+                if sample.is_finite() { *destination += sample; }
+            }
+            self.preview_position += step;
+        }
+    }
+
     fn fill(&mut self, out: &mut [f32], channels: usize) {
         self.drain();
         let channels = channels.max(1);
@@ -607,6 +655,7 @@ struct Side {
     /// Editor handles of the live instances.
     editors: HashMap<(TrackId, usize), Box<dyn PluginEditor>>,
     layouts: HashMap<(TrackId, usize), (bool, usize)>,
+    load_failures: Vec<(String, String)>,
     /// State readers of the live instances.
     states: BTreeMap<(TrackId, usize), Box<dyn PluginStateReader>>,
     /// Instances that refused their stored state: saves keep that state until the plugin's editor
@@ -616,12 +665,13 @@ struct Side {
     old_sessions: Option<Receiver<Arc<Session>>>,
     retired_states: Option<Receiver<Box<PreparedPlayback>>>,
     retired_inputs: Option<Receiver<Box<PreparedInput>>>,
+    retired_previews: Option<Receiver<Arc<soundcraft_model::SourceAudio>>>,
     latest_session: Option<Arc<Session>>,
 }
 
 impl Side {
     fn new(rate: f32, garbage: Receiver<Vec<Box<dyn Plugin>>>) -> Side {
-        Side { shadow: HashMap::new(), rate, editors: HashMap::new(), layouts: HashMap::new(), states: BTreeMap::new(), refused: HashSet::new(), garbage, old_sessions: None, retired_states: None, retired_inputs: None, latest_session: None }
+        Side { shadow: HashMap::new(), rate, editors: HashMap::new(), layouts: HashMap::new(), load_failures: Vec::new(), states: BTreeMap::new(), refused: HashSet::new(), garbage, old_sessions: None, retired_states: None, retired_inputs: None, retired_previews: None, latest_session: None }
     }
 
     /// Drops retired instances (closing their editors first, inside the plugin's drop) and
@@ -629,6 +679,7 @@ impl Side {
     fn collect_garbage(&mut self) {
         if let Some(receiver) = &self.retired_states { receiver.try_iter().for_each(drop); }
         if let Some(receiver) = &self.retired_inputs { receiver.try_iter().for_each(drop); }
+        if let Some(receiver) = &self.retired_previews { receiver.try_iter().for_each(drop); }
         while let Ok(g) = self.garbage.try_recv() {
             for p in g {
                 log::debug!("plugin instance released: {}", p.info().name);
@@ -645,7 +696,9 @@ impl Side {
         self.retired_states = Some(receiver);
         let (inputs, receiver) = sync_channel(OLD_SESSIONS);
         self.retired_inputs = Some(receiver);
-        let _ = tx.send(Cmd::Reclaim(states, inputs));
+        let (previews, receiver) = sync_channel(OLD_SESSIONS);
+        self.retired_previews = Some(receiver);
+        let _ = tx.send(Cmd::Reclaim(states, inputs, previews));
         let (otx, orx) = sync_channel(OLD_SESSIONS);
         self.old_sessions = Some(orx);
         let _ = tx.send(Cmd::OldSessions(otx));
@@ -940,6 +993,32 @@ impl Player {
         self.side().editors.contains_key(&(track, slot))
     }
 
+    pub fn preview_sample(&self, audio: Arc<soundcraft_model::SourceAudio>) -> Result<(), String> {
+        if self.silent { return Err("Choose an audio output to preview samples".into()); }
+        self.send(Cmd::Preview(Some(audio))).map_err(|_| "Sample preview is busy; try again".into())
+    }
+
+    pub fn stop_sample_preview(&self) { let _ = self.send(Cmd::Preview(None)); }
+
+    pub fn sample_preview_gain(&self, gain: f32) { let _ = self.send(Cmd::PreviewGain(gain)); }
+
+    pub fn invalidate_plugin_slots(&self, slots: &[(TrackId, usize)]) {
+        let mut side = self.side();
+        for slot in slots { side.forget(*slot); }
+    }
+
+    pub fn take_plugin_load_failures(&self) -> Vec<(String, String)> { std::mem::take(&mut self.side().load_failures) }
+
+    pub fn retry_plugin(&self, id: &str, session: Arc<Session>) {
+        {
+            let mut side = self.side();
+            let keys: Vec<_> = side.shadow.iter().filter(|(_, (plugin, _, created))| plugin == id && !*created).map(|(key, _)| *key).collect();
+            for key in keys { side.forget(key); }
+            side.load_failures.retain(|(plugin, _)| plugin != id);
+        }
+        self.update_session(session);
+    }
+
     pub fn plugin_routing_info(&self, track: TrackId, slot: usize) -> (bool, usize) {
         self.side().layouts.get(&(track, slot)).copied().unwrap_or((false, 1))
     }
@@ -1101,6 +1180,7 @@ impl Side {
             let made = soundcraft_mix::create_instance(&spec.id, spec.state.as_deref(), sr, BLOCK, spec.ch);
             log::debug!("plugin instance for {:?} slot {}: {} ({} ch, created: {})", spec.track, spec.slot, spec.id, spec.ch, made.is_some());
             self.shadow.insert(key, (spec.id.clone(), spec.ch, made.is_some()));
+            if made.is_none() { self.load_failures.push((spec.id.clone(), "The plugin could not be instantiated. Check its authorization, installation and compatibility, then retry.".into())); }
             if let Some(soundcraft_mix::NewInstance { mut plugin, refused_state }) = made {
                 self.layouts.insert(key, (plugin.has_sidechain(), plugin.output_bus_count().min(16)));
                 if let Some(e) = plugin.editor() {
@@ -1170,6 +1250,7 @@ where
                         state.shared.record_clock.nanos.store(record::clock_nanos().saturating_add(delay).max(1), Ordering::Release);
                     }
                     state.fill(d, channels);
+                    state.fill_preview(d, channels);
                 });
                 for (o, x) in out.iter_mut().zip(s.iter()) {
                     *o = T::from_sample(*x);
@@ -1688,3 +1769,39 @@ mod long_preview_lifetime_tests {
 }
 
 
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod sample_browser_preview_tests {
+    use super::*;
+
+    #[test]
+    fn sample_preview_resamples_without_moving_transport_and_returns_retired_audio() {
+        let shared = Arc::new(Shared {
+            position: AtomicI64::new(1234), playing: AtomicBool::new(false), auditioning: AtomicBool::new(false),
+            speed: AtomicU32::new(1000), meters: MeterMailbox::default(), session_pending: AtomicBool::new(false), record_clock: RecordClock::default(),
+        });
+        let (sender, receiver) = channel();
+        let mut state = AudioState::new(receiver, Arc::clone(&shared), Arc::new(Session::default()), 48_000.0, channel().0);
+        let (retire, retired) = sync_channel(1);
+        state.preview_retirement = Some(retire);
+        let audio = Arc::new(soundcraft_model::SourceAudio::new(soundcraft_audio_io::AudioBuffer { sample_rate: 24_000, channels: vec![vec![0.5; 4800]] }));
+        let weak = Arc::downgrade(&audio);
+        sender.send(Cmd::Preview(Some(audio))).unwrap();
+        state.drain();
+        let mut output = vec![0.0; 1920];
+        state.fill_preview(&mut output, 2);
+        assert_eq!(state.preview_position, 480.0);
+        assert!(output.iter().any(|sample| *sample > 0.0));
+        assert_eq!(shared.position.load(Ordering::Relaxed), 1234);
+        assert!(!shared.playing.load(Ordering::Relaxed));
+        sender.send(Cmd::Preview(None)).unwrap();
+        state.drain();
+        assert!(weak.upgrade().is_some());
+        state.drain();
+        let returned = retired.try_recv().unwrap();
+        assert!(weak.upgrade().is_some());
+        drop(returned);
+        assert!(weak.upgrade().is_none());
+    }
+}

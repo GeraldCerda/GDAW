@@ -271,6 +271,13 @@ fn main_area_content(app: &mut SoundApp, ui: &mut Ui) {
     let empty = Rect::from_min_max(pos2(full.min.x, y.max(tl.min.y)), tl.max);
     if empty.height() > 4.0 {
         let resp = ui.interact(empty, ui.id().with("empty"), Sense::click());
+        if let Some(item) = resp.dnd_release_payload::<crate::devices::BrowserItem>() {
+            if let Some(position) = ui.ctx().pointer_latest_pos() {
+                let at = drag_snap(app.engine.session(), sample_at(app.engine.session(), tl, position.x).max(0), ui.input(|input| input.modifiers.command));
+                let _ = app.run("edit.select", json!({"start": at, "end": at}));
+            }
+            crate::devices::new_track_drop(app, &item);
+        }
         if resp.double_clicked() {
             let _ = app.dialogs.open_for_command(&app.engine, "track.new");
         } else if resp.clicked() {
@@ -954,10 +961,7 @@ fn track_header(app: &mut SoundApp, ui: &mut Ui, track: &Track, head: Rect, sele
         click_track(app, id, ui.input(|i| i.modifiers), in_edit_window);
     }
     bg.context_menu(|ui| track_context_menu(app, ui, id));
-    if let Some(item) = bg.dnd_release_payload::<crate::devices::BrowserItem>() {
-        let _ = app.run("edit.select", json!({"tracks": [id.0]}));
-        crate::devices::insert_item(app, id, &item);
-    }
+    crate::devices::track_drop(app, id, &bg);
     let at = |x: f32, y: f32, w: f32, h: f32| Rect::from_min_size(pos2(head.min.x + x, head.min.y + y), vec2(w, h));
     let strip = rgb(track.color);
     let ink = shade(strip, -0.8);
@@ -1992,6 +1996,16 @@ fn clip_gain_popup(ctx: &egui::Context, fader_bottom: Pos2, pos: f32) {
 fn lane_interaction(app: &mut SoundApp, ui: &mut Ui, track: &Track, lane: Rect, tl: Rect) {
     let id = ui.id().with(("lane", track.id.0));
     let resp = ui.interact(lane, id, Sense::click_and_drag());
+    if let Some(item) = resp.dnd_release_payload::<crate::devices::BrowserItem>() {
+        if let crate::devices::BrowserItem::Sample(path) = &*item {
+            if track.kind == soundcraft_model::TrackKind::Audio {
+                let position = ui.ctx().pointer_latest_pos().map_or(tl.min.x, |position| position.x);
+                let at = drag_snap(app.engine.session(), sample_at(app.engine.session(), tl, position).max(0), ui.input(|input| input.modifiers.command));
+                let _ = app.run("file.import_audio", json!({"track": track.id.0, "path": path, "at": at}));
+            } else { crate::devices::insert_item(app, track.id, &item); }
+        } else { crate::devices::insert_item(app, track.id, &item); }
+    }
+    if resp.dnd_hover_payload::<crate::devices::BrowserItem>().is_some() { ui.painter().rect_stroke(lane, 0.0, Stroke::new(2.0, Tokens::current().accent), StrokeKind::Inside); }
     // The clip menu is attached before the early return below: once the menu is open the pointer
     // is over the popup, the lane has no hover position, and the rest of this function bails out.
     // The clip is remembered at the right-click so the menu keeps its target while it is used.

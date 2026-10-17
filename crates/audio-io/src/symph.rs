@@ -140,11 +140,12 @@ fn info_of(reader: &dyn FormatReader, detected: FileFormat) -> Result<(u32, Audi
 }
 
 /// Decode the whole first audio track. When `count_only`, samples are counted but not stored.
-fn run(bytes: &[u8], detected: FileFormat, count_only: bool) -> Result<(AudioInfo, AudioBuffer)> {
+fn run(bytes: &[u8], detected: FileFormat, count_only: bool, preview_seconds: Option<u32>) -> Result<(AudioInfo, AudioBuffer)> {
     let mut reader = open(bytes)?;
     let (track_id, mut info) = info_of(reader.as_ref(), detected)?;
+    let mut limit = preview_seconds.map(|seconds| crate::preview_frames(&info, seconds));
     if let Some(n) = reader.tracks().iter().find(|t| t.id == track_id).and_then(|t| t.codec_params.n_frames) {
-        let total = n.saturating_mul(u64::from(info.channels.max(1)));
+        let total = limit.map_or(n, |limit| n.min(limit)).saturating_mul(u64::from(info.channels.max(1)));
         if !count_only && total > MAX_DECODE_SAMPLES {
             return Err(AudioError::TooLarge(format!("{total} samples exceeds the decode limit")));
         }
@@ -202,9 +203,10 @@ fn run(bytes: &[u8], detected: FileFormat, count_only: bool) -> Result<(AudioInf
         if planar.is_empty() {
             // The decoded stream is authoritative for the channel count.
             info.channels = u16::try_from(ch).map_err(|_| AudioError::Unsupported("too many channels".into()))?;
+            if let Some(seconds) = preview_seconds { if spec.rate > 0 { info.sample_rate = spec.rate; } limit = Some(crate::preview_frames(&info, seconds)); }
             planar = (0..ch).map(|_| Vec::new()).collect();
         }
-        let n = decoded.frames() as u64;
+        let n = limit.map_or(decoded.frames() as u64, |limit| (decoded.frames() as u64).min(limit.saturating_sub(frames)));
         frames = frames.saturating_add(n);
         if frames.saturating_mul(ch as u64) > MAX_DECODE_SAMPLES {
             return Err(AudioError::TooLarge("decoded audio exceeds the 4 GiB limit".into()));
@@ -218,11 +220,12 @@ fn run(bytes: &[u8], detected: FileFormat, count_only: bool) -> Result<(AudioInf
             _ => sbuf.insert(SampleBuffer::<f32>::new(needed, spec)),
         };
         sb.copy_interleaved_ref(decoded);
-        for frame in sb.samples().chunks_exact(ch) {
+        for frame in sb.samples().chunks_exact(ch).take(n as usize) {
             for (dst, &s) in planar.iter_mut().zip(frame) {
                 dst.push(if s.is_finite() { s } else { 0.0 });
             }
         }
+        if limit.is_some_and(|limit| frames >= limit) { break; }
     }
     if info.channels == 0 {
         return Err(AudioError::Malformed("stream contains no audio".into()));
@@ -243,10 +246,14 @@ pub(crate) fn probe(bytes: &[u8], detected: FileFormat) -> Result<AudioInfo> {
             return Ok(info);
         }
         // Length not in the header (e.g. MP3 without a Xing frame): count by decoding.
-        run(bytes, detected, true).map(|(i, _)| i)
+        run(bytes, detected, true, None).map(|(i, _)| i)
     })
 }
 
 pub(crate) fn decode(bytes: &[u8], detected: FileFormat) -> Result<(AudioInfo, AudioBuffer)> {
-    guarded(|| run(bytes, detected, false))
+    guarded(|| run(bytes, detected, false, None))
+}
+
+pub(crate) fn decode_preview(bytes: &[u8], detected: FileFormat, seconds: u32) -> Result<(AudioInfo, AudioBuffer)> {
+    guarded(|| run(bytes, detected, false, Some(seconds)))
 }

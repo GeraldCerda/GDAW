@@ -937,7 +937,7 @@ pub fn sanitize_name(n: &str) -> String {
 /// In the browser there are no folders: the session and all its audio go out as one bundle file
 /// (`<name>.scraftz`, see [`session_bundle`]) through the host's delivery hook ([`set_deliver`]).
 pub fn save_session(e: &mut Engine, path: &str) -> Result<usize> {
-    if cfg!(target_arch = "wasm32") {
+    if cfg!(target_arch = "wasm32") || is_bundle_path(path) {
         return save_session_bundle(e, path);
     }
     let (fresh, written, p) = write_session(e.session(), path, false)?;
@@ -957,6 +957,7 @@ pub fn save_copy(e: &Engine, path: &str) -> Result<usize> {
 /// File › Save Session Copy In: a normal session folder that does not rename, retarget or
 /// clean the session that stays open.
 pub fn save_session_copy(e: &Engine, path: &str) -> Result<usize> {
+    if is_bundle_path(path) { return export_project(e, path); }
     write_session(e.session(), path, false).map(|(_, n, _)| n)
 }
 
@@ -1164,7 +1165,17 @@ fn store_wav(dir: &Path, stem: &str, bytes: &[u8]) -> Result<(String, bool)> {
 
 /// Open a `.scraft` session and decode its audio files (missing files are reported, not fatal).
 pub fn open_session(e: &mut Engine, path: &str) -> Result<Vec<String>> {
-    let text = read_text(path)?;
+    let bytes = read_file(path)?;
+    if bytes.starts_with(b"PK\x03\x04") {
+        let missing = open_session_bytes(e, path, &bytes)?;
+        e.path = Some(path.to_string());
+        let session = e.session_mut();
+        session.folder = None;
+        for source in &mut session.sources { if session.pool.get(source.id).is_some() { source.unsaved = true; } }
+        e.mark_clean();
+        return Ok(missing);
+    }
+    let text = String::from_utf8(bytes).map_err(|error| EngineError::Io(error.to_string()))?;
     let mut s = Session::from_json(&text).map_err(|err| EngineError::Io(err.to_string()))?;
     let dir = Path::new(path).parent().map(Path::to_path_buf).unwrap_or_default();
     let mut missing = Vec::new();
@@ -1220,7 +1231,7 @@ pub(crate) fn decode_file(files: &mut DecodedFiles, p: &Path, rate: u32) -> std:
 /// Extension of a session bundle: one zip file holding the `.scraft` session and its
 /// `Audio Files/`, the same layout as a saved session folder. The browser has no folders, so it
 /// saves and opens sessions as bundles.
-pub const BUNDLE_EXTENSION: &str = "scraftz";
+pub const BUNDLE_EXTENSION: &str = "gdawz";
 
 /// Most entries and bytes a bundle may unpack to (bundles are hostile input).
 const MAX_BUNDLE_ENTRIES: usize = 10_000;
@@ -1256,12 +1267,15 @@ pub fn session_bundle(session: &Session) -> Result<(Vec<u8>, Session)> {
     use std::io::Write as _;
     let zerr = |err: zip::result::ZipError| EngineError::Io(format!("bundle: {err}"));
     let ioerr = |err: std::io::Error| EngineError::Io(format!("bundle: {err}"));
+    if !session.videos.is_empty() { return Err(EngineError::Io("Portable audio projects do not yet embed video. Save a native session folder and keep its video media with it.".into())); }
+    if session.sources.len().saturating_add(1) > MAX_BUNDLE_ENTRIES { return Err(EngineError::Io("Too many media files for a portable project. Save a native session folder instead.".into())); }
+    let mut total = 0u64;
     let mut s = session.clone();
     let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored).large_file(true);
     let mut taken = std::collections::HashSet::new();
     for src in &mut s.sources {
-        let Some(audio) = s.pool.get(src.id) else { continue };
+        let audio = s.pool.get(src.id).ok_or_else(|| EngineError::Io(format!("Cannot package missing media: {}", src.name)))?;
         let base = sanitize_name(&src.name);
         let mut target = format!("Audio Files/{base}.wav");
         let mut k = 1;
@@ -1271,6 +1285,8 @@ pub fn session_bundle(session: &Session) -> Result<(Vec<u8>, Session)> {
         }
         let opts_wav = EncodeOptions { format: FileFormat::Wav, bit_depth: soundcraft_audio_io::BitDepth::Float32, dither: false, bwf: None };
         let bytes = soundcraft_audio_io::encode(&audio.buffer, &opts_wav).map_err(|err| EngineError::Io(err.to_string()))?;
+        total = total.saturating_add(bytes.len() as u64);
+        if total > MAX_BUNDLE_BYTES { return Err(EngineError::Io("Portable projects are limited to 1 GiB. Save a native session folder for a larger project.".into())); }
         w.start_file(target.as_str(), opts).map_err(zerr)?;
         w.write_all(&bytes).map_err(ioerr)?;
         taken.insert(target.clone());
@@ -1279,6 +1295,7 @@ pub fn session_bundle(session: &Session) -> Result<(Vec<u8>, Session)> {
         src.format = FileFormat::Wav;
     }
     let text = s.to_json().map_err(|err| EngineError::Io(err.to_string()))?;
+    if total.saturating_add(text.len() as u64) > MAX_BUNDLE_BYTES { return Err(EngineError::Io("The portable project exceeds 1 GiB".into())); }
     w.start_file(format!("{}.{}", sanitize_name(&s.name), soundcraft_model::SESSION_EXTENSION), opts).map_err(zerr)?;
     w.write_all(text.as_bytes()).map_err(ioerr)?;
     let bytes = w.finish().map_err(zerr)?.into_inner();
@@ -1287,15 +1304,19 @@ pub fn session_bundle(session: &Session) -> Result<(Vec<u8>, Session)> {
 
 /// Save as a bundle named after `path`'s file name, delivered through the host ([`write_file`]).
 fn save_session_bundle(e: &mut Engine, path: &str) -> Result<usize> {
+    crate::file_access::check_write(Path::new(path)).map_err(EngineError::Io)?;
     let stem = Path::new(path).file_stem().and_then(|x| x.to_str()).filter(|x| !x.is_empty()).map(str::to_string);
     let mut s = e.session().clone();
     if let Some(stem) = stem {
         s.name = stem;
     }
-    let (bytes, fresh) = session_bundle(&s)?;
-    let file = format!("{}.{BUNDLE_EXTENSION}", sanitize_name(&fresh.name));
-    write_file(&file, &bytes)?;
+    let (bytes, mut fresh) = session_bundle(&s)?;
+    let file = if cfg!(target_arch = "wasm32") { format!("{}.{BUNDLE_EXTENSION}", sanitize_name(&fresh.name)) } else { path.to_string() };
+    if cfg!(target_arch = "wasm32") { write_file(&file, &bytes)?; }
+    else { let target = Path::new(&file); if let Some(parent) = target.parent() { make_dir(parent)?; } if target.is_file() { back_up(target); } replace_file(&target.with_extension("gdawz.partial"), target, &bytes)?; }
     let written = fresh.sources.iter().filter(|x| fresh.pool.get(x.id).is_some()).count();
+    fresh.folder = None;
+    for source in &mut fresh.sources { source.unsaved = true; }
     *e.session_mut() = fresh;
     e.path = Some(file);
     e.mark_clean();
@@ -1359,14 +1380,14 @@ fn read_bundle(bytes: &[u8]) -> Result<(String, std::collections::HashMap<String
         let mut data = Vec::new();
         // The declared size is hostile too: never read past it.
         f.by_ref().take(size).read_to_end(&mut data).map_err(|err| EngineError::Io(format!("bundle: {rel}: {err}")))?;
-        let is_session = !rel.contains('/') && Path::new(&rel).extension().and_then(|x| x.to_str()) == Some(soundcraft_model::SESSION_EXTENSION);
+        let is_session = !rel.contains('/') && Path::new(&rel).extension().and_then(|x| x.to_str()).is_some_and(|extension| extension.eq_ignore_ascii_case("gdaw") || extension.eq_ignore_ascii_case("scraft"));
         if is_session && text.is_none() {
             text = Some(String::from_utf8(data).map_err(|_| EngineError::Io(format!("bundle: {rel} is not text")))?);
         } else {
             files.insert(rel, data);
         }
     }
-    let text = text.ok_or_else(|| EngineError::Io("bundle: no .scraft session inside".into()))?;
+    let text = text.ok_or_else(|| EngineError::Io("bundle: no GDAW session inside".into()))?;
     Ok((text, files))
 }
 
@@ -1972,7 +1993,7 @@ mod bundle_tests {
             assert_eq!(a.buffer.channels, b.buffer.channels, "{}: float WAV keeps every sample", src.name);
         }
         assert!(!r.is_dirty());
-        assert_eq!(r.path.as_deref(), Some("Midnight Groove.scraftz"));
+        assert_eq!(r.path.as_deref(), Some("Midnight Groove.gdawz"));
     }
 
     #[test]
@@ -2023,3 +2044,66 @@ mod bundle_tests {
     }
 }
 
+
+pub fn is_session_path(path: &str) -> bool {
+    Path::new(path).extension().and_then(|extension| extension.to_str()).is_some_and(|extension| ["gdaw", "gdawz", "scraft", "scraftz"].iter().any(|known| extension.eq_ignore_ascii_case(known)))
+}
+
+fn is_bundle_path(path: &str) -> bool {
+    Path::new(path).extension().and_then(|extension| extension.to_str()).is_some_and(|extension| extension.eq_ignore_ascii_case("gdawz") || extension.eq_ignore_ascii_case("scraftz"))
+}
+
+pub fn export_project(engine: &Engine, path: &str) -> Result<usize> {
+    let target = project_file(path)?;
+    crate::file_access::check_write(&target).map_err(EngineError::Io)?;
+    let (bytes, session) = session_bundle(engine.session())?;
+    if let Some(parent) = target.parent() { make_dir(parent)?; }
+    if cfg!(target_arch = "wasm32") { write_file(&target.to_string_lossy(), &bytes)?; }
+    else { replace_file(&target.with_extension("gdawz.partial"), &target, &bytes)?; }
+    Ok(session.sources.len())
+}
+
+pub fn project_file(path: &str) -> Result<PathBuf> {
+    let path = PathBuf::from(path);
+    if path.extension().is_none() { return Ok(path.with_extension(BUNDLE_EXTENSION)); }
+    if is_bundle_path(&path.to_string_lossy()) { Ok(path) }
+    else { Err(EngineError::Io("Use .gdawz for a portable project, or Save Session As for a .gdaw session folder".into())) }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod portable_project_tests {
+    use super::*;
+
+    #[test]
+    fn a_portable_project_does_not_relink_to_unrelated_media_beside_its_archive() {
+        let root = std::env::temp_dir().join(format!("gdaw-portable-collision-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(root.join("Audio Files")).unwrap();
+        let options = EncodeOptions { format: FileFormat::Wav, bit_depth: soundcraft_audio_io::BitDepth::Float32, dither: false, bwf: None };
+        let wrong = AudioBuffer { sample_rate: 48_000, channels: vec![vec![-0.25; 128]] };
+        std::fs::write(root.join("Audio Files/Clip.wav"), soundcraft_audio_io::encode(&wrong, &options).unwrap()).unwrap();
+        let mut engine = Engine::default();
+        add_source(engine.session_mut(), "Clip", AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.5; 128]] }, None, FileFormat::Wav);
+        let archive = root.join("Song.gdawz");
+        export_project(&engine, &archive.to_string_lossy()).unwrap();
+        save_session(&mut engine, &archive.to_string_lossy()).unwrap();
+        assert!(engine.session().folder.is_none());
+        assert!(engine.session().sources.iter().all(|source| source.unsaved));
+        let saved_copy = root.join("Saved Copy.gdaw");
+        save_session(&mut engine, &saved_copy.to_string_lossy()).unwrap();
+        let mut saved = Engine::default();
+        assert!(open_session(&mut saved, &saved_copy.to_string_lossy()).unwrap().is_empty());
+        assert_eq!(saved.session().pool.get(saved.session().sources[0].id).unwrap().buffer.channels[0][0], 0.5);
+        let mut opened = Engine::default();
+        assert!(open_session(&mut opened, &archive.to_string_lossy()).unwrap().is_empty());
+        assert!(!opened.is_dirty());
+        let native = root.join("Copy.gdaw");
+        save_session(&mut opened, &native.to_string_lossy()).unwrap();
+        let mut reopened = Engine::default();
+        assert!(open_session(&mut reopened, &native.to_string_lossy()).unwrap().is_empty());
+        let source = &reopened.session().sources[0];
+        assert_eq!(reopened.session().pool.get(source.id).unwrap().buffer.channels[0][0], 0.5);
+        assert_eq!(session_file("New Song"), PathBuf::from("New Song.gdaw"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

@@ -1,4 +1,4 @@
-GDAW Mac Test Kit v8 — source candidate
+GDAW Mac Test Kit v9 — source candidate
 
 Repository: https://github.com/GeraldCerda/GDAW
 Exact package revision: SOURCE_COMMIT beside this file.
@@ -13,15 +13,16 @@ The normal command runs no regression suites. It builds the native Mac applicati
 The installed app records the exact source revision as GDAWBuildCommit in Contents/Info.plist. Preferences use ~/Library/Application Support/GDAW Test. Build and launch logs use this kit's logs directory.
 
 Source changes in this candidate:
-- Startup plugin discovery, concurrent AU/VST3/CLAP enumeration, a startup progress screen, persisted catalog and isolated-scan descriptor/failure caches, explicit scan failures and rescan support.
-- User-first VST3/CLAP search precedence; network and application-bundled VST3 locations on macOS.
-- Automatic editor opening after insertion, AUv2 native Cocoa views and parameter gestures, bounded VST3/CLAP edit and gesture queues, and CLAP parameter flushing while stopped.
-- Instrument processing follows its displayed insert position. Legacy overflow K is visible in Edit and Mix as well as the bottom device chain.
-- Named hardware output mixing and sends, physical Aux/Folder input monitoring, plugin key-input and additional-output routing through internal buses, graph/solo handling, missing-route diagnostics and bus-delete cleanup.
-- Pan/mute/send/plugin Touch and Latch writing, Touch return ramps, native editor gesture forwarding and mute-lane override fixes.
-- Capture/output timestamp anchors for take placement and trimming of captured material before timeline zero.
-- AudioSuite partial-selection fragments, preservation of their editable clip effects, and durable copies of previously memory-only original media in transaction snapshots.
+- Drag plugins from the browser onto inserts, track headers and empty track space. Drag existing insert cells or device titles to reorder within a track or swap between tracks. Option-drag copies into an empty slot. Plugin state, parameter automation and plugin bus assignments move together. Instrument tracks still hold one instrument. Moving a hosted device recreates its affected instances; uninterrupted audio during moves is not established.
+- Add up to 64 sample-library locations, search a background index, keep favorites and recent imports, drag samples into tracks or the timeline, and audition without moving the song playhead. Preview has its own gain, background decoding and Stop control. It reads at most 128 MiB per source, decodes up to 30 seconds with a sample bound, and does not tempo-warp. Indexing caps are 100,000 samples, 500,000 visited entries and 24 directory levels; descendant symlinks are skipped. Use Refresh for changes made while GDAW is open.
+- Persistent platform-specific plugin catalogs now restore the host registries as well as the picker. Unchanged installations skip plugin enumeration on later starts. Changed installations refresh in the background using descriptor caches; Rescan Plugins explicitly refreshes everything. First discovery retains the progress screen. Cache paths honor SOUNDCRAFT_CONFIG_DIR; an empty value disables caching.
+- Reported third-party instantiation failures are hidden from normal plugin pickers, with persistent reasons and Retry controls. Manual Hide handles plugins that continue loading in demo mode or defer authorization. Scan failures are listed and can be retried separately. There is no universal iLok license-status check; existing session inserts and states remain intact.
+- New native sessions use .gdaw, with the existing versioned JSON schema and media folder. Legacy .scraft/.scraftz files remain readable. Portable .gdawz audio projects package the session and float WAV media, refuse missing media/video, and are limited to 1 GiB / 10,000 entries. A portable-project save/open cannot silently reuse unrelated media beside the archive.
+- Export WAV Tracks and MIDI writes aligned 24-bit track WAVs, a main reference mix, Standard MIDI, session information and a JSON manifest into a new folder. Desktop rendering has progress/cancel, a captured session snapshot and staging cleanup on normal errors/cancellation. WAV origins and MIDI origins are recorded separately. Main master processing and send returns are represented in the reference mix; individual track files are not a lossless reconstruction of arbitrary bus routing. Process crashes can leave staging folders.
+- Help > Developer API documents opt-in local control, capability discovery, session JSON, sample search/preview and plugin availability operations. examples/gdaw_client.py supplies a standard-library client. Command batches are ordered, not atomic. Existing CLI and MCP entry points remain available. PTX, ALS, AAF and OMF interchange are not implemented.
+- Routing validation now also checks feedback cycles introduced by plugin key-input and additional-output assignments.
 
+This includes the preceding source work for startup discovery, native plugin editors, instruments in ordinary inserts, hardware/bus routing, Touch/Latch automation, capture timestamp anchors and AudioSuite transaction fragments. Those earlier changes retain their verification limits.
 This revision has NOT been compiled, type/borrow checked, linted, linked, installed or launched. No new or existing Rust tests have run. The added test source is unexecuted. Static source review, TOML parsing, shell syntax checking and Git/package byte comparisons do not establish a clean application build.
 
 Still incomplete:
@@ -32,7 +33,7 @@ Still incomplete:
 - AudioSuite preview, automatic recovery discovery/replay, replacement crossfades, media ownership/garbage collection, and a permanent project location for unsaved-session transaction media. Partial selections that change length require a full clip selection. Missing original media without a pool copy cannot be recovered.
 - AAX, VST2 and asynchronously instantiated AUv3 plugins are unsupported. External MIDI-device recording/routing was not implemented or validated by this update.
 
-Untested behavior includes every new and existing Rust test; real AU/VST3/CLAP discovery, editors, automation and plugin states; Apollo and other physical I/O, recording offsets and drift; callback deadlines and saturation; audible delay transitions, routing null/phase tests and offline parity; AudioSuite failure/crash/reopen/undo behavior; UI rendering/interaction; Mac signing, /Applications installation and launch; Windows/Linux/web builds.
+Untested behavior includes every new and existing Rust test; drag/reorder/copy undo and plugin-state restoration; catalog invalidation, authorization recovery and failed-scan retries; sample indexing, decoding, output routing and preview lifetime; native/portable project save/open/media round trips; WAV/MIDI export, cancellation, failure handling and other-DAW import; developer client/API/MCP requests; real AU/VST3/CLAP discovery, editors, automation and plugin states; Apollo and other physical I/O, recording offsets and drift; callback deadlines and saturation; audible delay transitions, routing null/phase tests and offline parity; AudioSuite failure/crash/reopen/undo behavior; UI rendering/interaction; Mac signing, /Applications installation and launch; Windows/Linux/web builds.
 
 Optional verification is explicit:
 bash "$HOME/Downloads/GDAW_Test_Kit/build_test.sh" --verify

@@ -279,3 +279,16 @@ mod tests {
         assert_eq!(version_string(0x0001_0203), "1.2.3");
     }
 }
+
+pub fn restore_catalog(descriptors: Vec<AuDescriptor>) {
+    let mut registry = registry().lock().unwrap_or_else(PoisonError::into_inner);
+    if registry.scanned.is_none() { registry.scanned = Some(descriptors); }
+}
+
+pub fn retry_plugin(id: &str) {
+    registry().lock().unwrap_or_else(PoisonError::into_inner).failed.remove(id);
+}
+
+pub fn cached() -> Option<Vec<AuDescriptor>> {
+    registry().lock().unwrap_or_else(PoisonError::into_inner).scanned.clone()
+}

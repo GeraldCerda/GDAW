@@ -101,10 +101,16 @@ pub fn cached() -> Option<Vec<Vst3Descriptor>> {
 }
 
 pub fn rescan() -> Vec<Vst3Descriptor> {
-    let mut r = registry().lock().unwrap_or_else(PoisonError::into_inner);
-    r.scanned = None;
-    r.failed.clear();
-    ensure_scanned(&mut r).clone()
+    let extra = {
+        let mut registry = registry().lock().unwrap_or_else(PoisonError::into_inner);
+        registry.failed.clear();
+        registry.extra_dirs.clone()
+    };
+    let mut directories = paths::default_search_paths();
+    directories.extend(extra);
+    let descriptors = scan_paths(&directories);
+    registry().lock().unwrap_or_else(PoisonError::into_inner).scanned = Some(descriptors.clone());
+    descriptors
 }
 
 pub fn add_search_dir(dir: &Path) -> usize {
@@ -278,4 +284,13 @@ mod tests {
         assert_eq!(unit_from_label("st"), Unit::Semitones);
         assert_eq!(unit_from_label("furlongs"), Unit::None);
     }
+}
+
+pub fn restore_catalog(descriptors: Vec<Vst3Descriptor>) {
+    let mut registry = registry().lock().unwrap_or_else(PoisonError::into_inner);
+    if registry.scanned.is_none() { registry.scanned = Some(descriptors); }
+}
+
+pub fn retry_plugin(id: &str) {
+    registry().lock().unwrap_or_else(PoisonError::into_inner).failed.remove(id);
 }

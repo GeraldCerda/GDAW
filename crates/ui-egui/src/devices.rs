@@ -12,6 +12,30 @@ pub enum BrowserItem {
     Preset(String, String),
 }
 
+#[derive(Clone)]
+pub struct InsertDrag { pub track: TrackId, pub slot: usize, pub plugin: String }
+
+pub fn move_drop(app: &mut SoundApp, track: TrackId, slot: usize, source: &InsertDrag, copy: bool) {
+    let _ = app.run("mix.insert_move", json!({"track": track.0, "from_track": source.track.0, "from": source.slot, "to": slot, "copy": copy, "expected_plugin": source.plugin}));
+}
+
+pub fn track_drop(app: &mut SoundApp, track: TrackId, response: &egui::Response) {
+    if let Some(item) = response.dnd_release_payload::<BrowserItem>() { insert_item(app, track, &item); }
+    if let Some(source) = response.dnd_release_payload::<InsertDrag>() {
+        let slot = app.engine.session().track(track).and_then(|track| track.mixer.inserts.iter().enumerate().find(|(slot, insert)| insert.is_none() && track.instrument_insert_slot() != Some(*slot)).map(|(slot, _)| slot));
+        if let Some(slot) = slot { move_drop(app, track, slot, &source, response.ctx.input(|input| input.modifiers.alt)); }
+        else { app.ui.status = "This track has no free insert. Drop onto a specific slot to reorder or swap.".into(); }
+    }
+}
+
+pub fn new_track_drop(app: &mut SoundApp, item: &BrowserItem) {
+    let instrument = match item { BrowserItem::Plugin(id) | BrowserItem::Preset(id, _) => app.browser.catalog.iter().find(|plugin| &plugin.id == id).is_some_and(|plugin| plugin.is_instrument), BrowserItem::Sample(_) => false };
+    let name = match item { BrowserItem::Plugin(id) | BrowserItem::Preset(id, _) => app.browser.catalog.iter().find(|plugin| &plugin.id == id).map(|plugin| plugin.name.clone()), BrowserItem::Sample(path) => std::path::Path::new(path).file_stem().map(|name| name.to_string_lossy().into_owned()) };
+    if let Ok(result) = app.run("track.new", json!({"kind": if instrument { "instrument" } else { "audio" }, "format": "stereo", "count": 1, "name": name})) {
+        if let Some(track) = result["tracks"][0].as_u64().map(TrackId) { let _ = app.run("edit.select", json!({"tracks": [track.0]})); insert_item(app, track, item); }
+    }
+}
+
 pub struct PluginScanUpdate {
     format: PluginFormat,
     plugins: Vec<BrowserPlugin>,
@@ -23,6 +47,10 @@ pub struct BrowserState {
     pub grouping: PluginGrouping,
     pub format: PluginFormat,
     pub plugins: Vec<BrowserPlugin>,
+    pub catalog: Vec<BrowserPlugin>,
+    pub unavailable: std::collections::BTreeMap<String, String>,
+    pub show_unavailable: bool,
+    pub samples: crate::sample_browser::SampleBrowser,
     pub plugins_loaded: bool,
     pub plugin_scan: Option<std::sync::mpsc::Receiver<PluginScanUpdate>>,
     pub pending_formats: usize,
@@ -44,6 +72,10 @@ impl Default for BrowserState {
             grouping: PluginGrouping::Developer,
             format: PluginFormat::All,
             plugins: crate::plugin_browser::built_in_catalog(),
+            catalog: crate::plugin_browser::built_in_catalog(),
+            unavailable: std::collections::BTreeMap::new(),
+            show_unavailable: false,
+            samples: crate::sample_browser::SampleBrowser::default(),
             plugins_loaded: false,
             plugin_scan: None,
             pending_formats: 0,
@@ -68,7 +100,7 @@ fn scan_plugins(app: &mut SoundApp, rescan: bool) {
         for format in [PluginFormat::Au, PluginFormat::Vst3, PluginFormat::Clap] {
             let sender = tx.clone();
             match std::thread::Builder::new().name(format!("{} plugin scan", format.label())).spawn(move || {
-                let plugins = crate::plugin_browser::catalog_format(format, rescan);
+                let plugins = crate::plugin_browser::catalog_format(format, true);
                 let _ = sender.send(PluginScanUpdate { format, plugins });
             }) {
                 Ok(_) => app.browser.pending_formats += 1,
@@ -81,7 +113,8 @@ fn scan_plugins(app: &mut SoundApp, rescan: bool) {
     }
     #[cfg(target_arch = "wasm32")]
     {
-        app.browser.plugins = crate::plugin_browser::catalog(rescan);
+        app.browser.catalog = crate::plugin_browser::catalog(rescan);
+        refresh_available(app);
         app.browser.plugins_loaded = true;
     }
 }
@@ -91,22 +124,17 @@ fn poll_plugins(app: &mut SoundApp) {
         let result = app.browser.plugin_scan.as_ref().map(|scan| scan.try_recv());
         match result {
             Some(Ok(update)) => {
-                app.browser.plugins.retain(|plugin| plugin.format != update.format);
-                app.browser.plugins.extend(update.plugins);
-                crate::plugin_browser::normalize(&mut app.browser.plugins);
+                app.browser.catalog.retain(|plugin| plugin.format != update.format);
+                app.browser.catalog.extend(update.plugins);
+                crate::plugin_browser::normalize(&mut app.browser.catalog);
+                refresh_available(app);
                 app.browser.pending_formats = app.browser.pending_formats.saturating_sub(1);
                 if app.browser.pending_formats == 0 {
                     app.browser.plugin_scan = None;
                     app.browser.startup_scan = false;
                     let failures = crate::plugin_scan::progress().failures.len();
                     app.ui.status = format!("Plugin scan complete: {} installed, {failures} failed", app.browser.plugins.iter().filter(|plugin| plugin.format != PluginFormat::BuiltIn).count());
-                    if let Some(path) = crate::plugin_scan::cache_dir().map(|path| path.join("catalog.json")) {
-                        if let Some(parent) = path.parent() {
-                            if std::fs::create_dir_all(parent).is_ok() {
-                                if let Ok(bytes) = serde_json::to_vec(&app.browser.plugins) { let _ = std::fs::write(path, bytes); }
-                            }
-                        }
-                    }
+                    crate::plugin_scan::save_catalog(&app.browser.catalog);
                 }
             }
             Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
@@ -122,18 +150,58 @@ fn poll_plugins(app: &mut SoundApp) {
 }
 
 pub fn begin_startup_scan(app: &mut SoundApp) {
-    if let Some(path) = crate::plugin_scan::cache_dir().map(|path| path.join("catalog.json")) {
+    if let Some(path) = crate::plugin_scan::cache_dir().map(|directory| directory.join("unavailable.json")) {
         if let Ok(metadata) = std::fs::metadata(&path) {
-            if metadata.len() <= 4_194_304 {
-                if let Ok(bytes) = std::fs::read(path) {
-                    if let Ok(plugins) = serde_json::from_slice::<Vec<BrowserPlugin>>(&bytes) { app.browser.plugins = plugins; }
-                }
+            if metadata.len() <= 33_554_432 {
+                if let Ok(bytes) = std::fs::read(path) { app.browser.unavailable = serde_json::from_slice(&bytes).unwrap_or_default(); }
             }
         }
+    }
+    if let Some((plugins, unchanged)) = crate::plugin_scan::restore_catalog() {
+        app.browser.catalog = plugins;
+        app.browser.plugins_loaded = true;
+        refresh_available(app);
+        if unchanged { app.ui.status = format!("{} plugins ready from cache", app.browser.plugins.len()); return; }
+        app.browser.startup_scan = false;
+        scan_plugins(app, false);
+        app.ui.status = "Plugins ready. Checking changed installations in the background…".into();
+        return;
     }
     app.browser.startup_scan = true;
     scan_plugins(app, false);
     if app.browser.plugin_scan.is_none() { app.browser.startup_scan = false; }
+}
+
+fn refresh_available(app: &mut SoundApp) {
+    app.browser.plugins = app.browser.catalog.iter().filter(|plugin| !app.browser.unavailable.contains_key(&plugin.id)).cloned().collect();
+}
+
+fn save_unavailable(app: &SoundApp) {
+    let Some(directory) = crate::plugin_scan::cache_dir() else { return };
+    if let Ok(bytes) = serde_json::to_vec(&app.browser.unavailable) {
+        if std::fs::create_dir_all(&directory).is_ok() {
+            let staged = directory.join(format!("unavailable.{}.partial", std::process::id()));
+            if std::fs::write(&staged, bytes).is_ok() { let _ = std::fs::rename(staged, directory.join("unavailable.json")); }
+        }
+    }
+}
+
+pub fn exclude_plugin(app: &mut SoundApp, id: &str, reason: &str) {
+    if !soundcraft_mix::is_third_party(id) || id.len() > 4096 { return; }
+    if app.browser.unavailable.len() >= 4096 && !app.browser.unavailable.contains_key(id) { return; }
+    app.browser.unavailable.insert(id.to_string(), reason.chars().filter(|character| !character.is_control()).take(512).collect());
+    refresh_available(app);
+    save_unavailable(app);
+}
+
+pub fn retry_plugin(app: &mut SoundApp, id: &str) {
+    soundcraft_vst3_host::retry_plugin(id);
+    soundcraft_clap_host::retry_plugin(id);
+    soundcraft_au_host::retry_plugin(id);
+    app.browser.unavailable.remove(id);
+    refresh_available(app);
+    save_unavailable(app);
+    if let Some(player) = &app.player { player.retry_plugin(id, app.engine.session_arc()); }
 }
 
 pub fn startup(app: &mut SoundApp, ui: &mut Ui) -> bool {
@@ -154,6 +222,8 @@ pub fn startup(app: &mut SoundApp, ui: &mut Ui) -> bool {
 
 pub(crate) fn prepare_plugins(app: &mut SoundApp) {
     poll_plugins(app);
+    let failures = app.player.as_ref().map_or_else(Vec::new, soundcraft_playback::Player::take_plugin_load_failures);
+    for (plugin, reason) in failures { exclude_plugin(app, &plugin, &reason); app.ui.status = reason; }
     if !app.browser.plugins_loaded && app.browser.plugin_scan.is_none() && app.player.is_some() {
         scan_plugins(app, false);
     }
@@ -165,17 +235,6 @@ pub fn selected_track(app: &SoundApp) -> Option<TrackId> {
         .or_else(|| session.edit.selected_clips.iter().find_map(|id| session.find_clip(*id).map(|(track, _)| track)))
 }
 
-fn refresh_files(app: &mut SoundApp) {
-    app.browser.files = std::fs::read_dir(&app.browser.folder).map(|entries| {
-        entries.flatten().take(512).filter_map(|entry| {
-            let path = entry.path();
-            let directory = path.is_dir();
-            let name = entry.file_name().to_string_lossy().into_owned();
-            (directory || crate::sampler_window::is_audio_name(&name)).then_some((name, path, directory))
-        }).collect()
-    }).unwrap_or_default();
-    app.browser.files.sort_by_cached_key(|(name, _, directory)| (!*directory, name.to_lowercase()));
-}
 
 pub fn insert_item(app: &mut SoundApp, track: TrackId, item: &BrowserItem) {
     let result = match item {
@@ -211,6 +270,9 @@ pub fn insert_item(app: &mut SoundApp, track: TrackId, item: &BrowserItem) {
     app.ui.show_devices = true;
     if let Ok(value) = &result {
         if matches!(item, BrowserItem::Plugin(_) | BrowserItem::Preset(_, _)) { app.show_insert_result(value); }
+    }
+    if result.is_ok() {
+        if let BrowserItem::Sample(path) = item { app.ui.recent_samples.retain(|recent| recent != path); app.ui.recent_samples.insert(0, path.clone()); app.ui.recent_samples.truncate(64); }
     }
     app.ui.status = match result {
         Ok(_) => "Device or sample loaded on the selected track".into(),
@@ -249,6 +311,11 @@ pub fn insert_effect_at(app: &mut SoundApp, track: TrackId, slot: usize, item: &
 fn row(app: &mut SoundApp, ui: &mut Ui, label: &str, item: BrowserItem) {
     let response = ui.add(egui::Label::new(label).sense(Sense::click_and_drag()));
     response.dnd_set_drag_payload(item.clone());
+    if let BrowserItem::Plugin(id) = &item {
+        response.context_menu(|ui| {
+            if ui.button("Hide from plugin list").clicked() { exclude_plugin(app, id, "Hidden by you. Activate or repair the plugin, then choose Retry."); ui.close(); }
+        });
+    }
     if response.double_clicked() {
         if let Some(track) = selected_track(app) {
             insert_item(app, track, &item);
@@ -277,40 +344,7 @@ pub fn browser(app: &mut SoundApp, ui: &mut Ui) {
     let category = app.browser.category.clone();
     ui.separator();
     if category == "Samples" {
-        ui.horizontal(|ui| {
-            if ui.button("Browse folder").clicked()
-                && let Some(path) = app.services.pick_folder.as_ref().and_then(|pick| pick("Sample folder"))
-            {
-                app.browser.folder = PathBuf::from(path);
-                refresh_files(app);
-            }
-            if ui.small_button("Refresh").clicked() {
-                refresh_files(app);
-            }
-            if ui.small_button("Up").clicked()
-                && let Some(parent) = app.browser.folder.parent().map(PathBuf::from)
-            {
-                app.browser.folder = parent;
-                refresh_files(app);
-            }
-        });
-        ui.label(app.browser.folder.to_string_lossy().as_ref());
-        let files = app.browser.files.clone();
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for (name, path, directory) in files {
-                if !name.to_lowercase().contains(&query) {
-                    continue;
-                }
-                if directory {
-                    if ui.button(format!("▸ {name}")).double_clicked() {
-                        app.browser.folder = path;
-                        refresh_files(app);
-                    }
-                } else {
-                    row(app, ui, &name, BrowserItem::Sample(path.to_string_lossy().into_owned()));
-                }
-            }
-        });
+        crate::sample_browser::show(app, ui);
         return;
     }
     if category == "Presets" {
@@ -352,6 +386,20 @@ pub fn browser(app: &mut SoundApp, ui: &mut Ui) {
         ui.ctx().request_repaint_after_secs(0.05);
     }
     ui.weak("Supported: VST3, Audio Units and CLAP. AAX and VST2 are not hosted.");
+    if ui.selectable_label(app.browser.show_unavailable, format!("Unavailable / hidden ({})", app.browser.unavailable.len().saturating_add(crate::plugin_scan::progress().failures.len()))).clicked() { app.browser.show_unavailable = !app.browser.show_unavailable; }
+    if app.browser.show_unavailable {
+        let unavailable = app.browser.unavailable.clone();
+        for (id, reason) in unavailable {
+            let name = app.browser.catalog.iter().find(|plugin| plugin.id == id).map_or(id.as_str(), |plugin| plugin.name.as_str()).to_string();
+            ui.horizontal(|ui| { ui.label(&name); if ui.small_button("Retry / re-enable").clicked() { retry_plugin(app, &id); } });
+            ui.small(reason);
+        }
+        let failures = crate::plugin_scan::progress().failures;
+        for (path, reason) in &failures { ui.label(std::path::Path::new(path).file_name().unwrap_or_default().to_string_lossy()); ui.small(reason); }
+        if !failures.is_empty() && ui.add_enabled(app.browser.plugin_scan.is_none(), egui::Button::new("Retry failed scans")).clicked() { crate::plugin_scan::retry_failed_scans(); scan_plugins(app, false); }
+        if app.browser.unavailable.is_empty() && failures.is_empty() { ui.weak("All known plugins are available."); }
+        return;
+    }
     let progress = crate::plugin_scan::progress();
     for path in progress.current.values() { ui.small(format!("Scanning {path}")); }
     if !progress.failures.is_empty() {
@@ -390,7 +438,9 @@ fn device(app: &mut SoundApp, ui: &mut Ui, track: TrackId, slot: usize, insert: 
     ui.set_max_width(rack_width + 20.0);
     ui.horizontal(|ui| {
         let visual = if instrument { app.engine.session().track(track).and_then(|track| track.instrument_insert_slot()).unwrap_or(0) } else { slot };
-        ui.strong(format!("{} · {name}", (b'A' + visual.min(25) as u8) as char));
+        let title = ui.add(egui::Label::new(egui::RichText::new(format!("{} · {name}", (b'A' + visual.min(25) as u8) as char)).strong()).sense(Sense::click_and_drag()));
+        title.dnd_set_drag_payload(InsertDrag { track, slot: visual, plugin: insert.plugin.clone() });
+        if let Some(source) = title.dnd_release_payload::<InsertDrag>() { move_drop(app, track, visual, &source, ui.input(|input| input.modifiers.alt)); }
         {
             if ui.small_button(if insert.bypass { "Enable" } else { "Bypass" }).clicked() {
                 let _ = app.run("mix.insert_bypass", json!({"track": track.0, "slot": visual}));
@@ -559,7 +609,8 @@ pub fn chain(app: &mut SoundApp, ui: &mut Ui) {
         ui.ctx().request_repaint_after_secs(0.03);
     }
     let Some(track) = selected_track(app).and_then(|id| app.engine.session().track(id).cloned()) else {
-        ui.label("Select a track to view its devices");
+        let drop = ui.add_sized([ui.available_width(), 90.0], egui::Label::new("Drop a plugin or sample here to create a track").sense(Sense::hover()));
+        if let Some(item) = drop.dnd_release_payload::<BrowserItem>() { new_track_drop(app, &item); }
         return;
     };
     ui.horizontal_wrapped(|ui| {

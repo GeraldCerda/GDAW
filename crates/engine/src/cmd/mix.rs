@@ -108,7 +108,7 @@ pub fn specs() -> Vec<CommandSpec> {
             has_selection,
             insert_params
         ),
-        cmd!("mix.insert_move", "Move Insert", [], None, "{track?, from, to}", has_selection, insert_move),
+        cmd!("mix.insert_move", "Move Insert", [], None, "{track?: destination, from_track?: source, from, to, copy?: false, expected_plugin?: id} — reorder within a track; swap between tracks; copy into an empty slot", has_selection, insert_move),
         cmd!(
             "mix.send",
             "Assign Send",
@@ -447,15 +447,7 @@ fn insert_params(e: &mut Engine, p: &Value) -> Result<Value> {
     Ok(json!({"set": n}))
 }
 
-fn insert_move(e: &mut Engine, p: &Value) -> Result<Value> {
-    let t = tracks_required(e, "mix.insert_move", p)?.first().copied().ok_or_else(|| bad("mix.insert_move", "no track"))?;
-    let from = slot_of(p, "from", INSERT_SLOTS).ok_or_else(|| bad("mix.insert_move", "`from` slot"))?;
-    let to = slot_of(p, "to", INSERT_SLOTS).ok_or_else(|| bad("mix.insert_move", "`to` slot"))?;
-    if let Some(tr) = e.session_mut().track_mut(t) {
-        tr.mixer.inserts.swap(from, to);
-    }
-    Ok(json!({}))
-}
+fn insert_move(e: &mut Engine, p: &Value) -> Result<Value> { crate::insert_drag::move_insert(e, p) }
 
 fn send(e: &mut Engine, p: &Value) -> Result<Value> {
     let bus = str_param(p, "bus").ok_or_else(|| bad("mix.send", "`bus` required"))?.to_string();

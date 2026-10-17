@@ -97,10 +97,16 @@ pub fn cached() -> Option<Vec<ClapDescriptor>> {
 }
 
 pub fn rescan() -> Vec<ClapDescriptor> {
-    let mut r = registry().lock().unwrap_or_else(PoisonError::into_inner);
-    r.scanned = None;
-    r.failed.clear();
-    ensure_scanned(&mut r).clone()
+    let extra = {
+        let mut registry = registry().lock().unwrap_or_else(PoisonError::into_inner);
+        registry.failed.clear();
+        registry.extra_dirs.clone()
+    };
+    let mut directories = paths::default_search_paths();
+    directories.extend(extra);
+    let descriptors = scan_paths(&directories);
+    registry().lock().unwrap_or_else(PoisonError::into_inner).scanned = Some(descriptors.clone());
+    descriptors
 }
 
 pub fn add_search_dir(dir: &Path) -> usize {
@@ -219,4 +225,13 @@ pub fn plugin_info(id: &str) -> Option<&'static PluginInfo> {
     }
     // Instantiate once to learn the parameters (CLAP exposes them only on an instance).
     instantiate_raw(id).ok().map(|(_, info)| info)
+}
+
+pub fn restore_catalog(descriptors: Vec<ClapDescriptor>) {
+    let mut registry = registry().lock().unwrap_or_else(PoisonError::into_inner);
+    if registry.scanned.is_none() { registry.scanned = Some(descriptors); }
+}
+
+pub fn retry_plugin(id: &str) {
+    registry().lock().unwrap_or_else(PoisonError::into_inner).failed.remove(id);
 }

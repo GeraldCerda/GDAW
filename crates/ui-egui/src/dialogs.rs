@@ -120,7 +120,7 @@ impl Dialogs {
                 path: if home.is_empty() {
                     format!("{name}.{}", soundcraft_engine::io::BUNDLE_EXTENSION)
                 } else {
-                    format!("{home}/{name}/{name}.scraft")
+                    format!("{home}/{name}/{name}.gdaw")
                 },
                 key: "path".into(),
             },
@@ -215,10 +215,11 @@ fn path_dialog(id: &str, home: &str, name: &str) -> Option<Dialog> {
         "file.print_score" => ".svg",
         "file.export_clip_groups" => ".scgrp",
         "file.export_session_text" => ".txt",
-        _ if id.contains("session") => ".scraft",
+        "file.export_project" => ".gdawz",
+        _ if id.contains("session") => ".gdaw",
         _ => "",
     };
-    let path = if importing || key == "dir" { format!("{home}/") } else { format!("{home}/{name}{ext}") };
+    let path = if id == "file.export_exchange" { format!("{home}/{name} Export") } else if importing || key == "dir" { format!("{home}/") } else { format!("{home}/{name}{ext}") };
     let title = format!("{} — {}", spec.menu.last().copied().unwrap_or("File"), spec.label.trim_end_matches("..."));
     Some(Dialog::PathPrompt { cmd: id.into(), title, path, key: key.into() })
 }
@@ -447,8 +448,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                 Dialog::PathPrompt { cmd, path, key, .. } => {
                     ui.add(egui::TextEdit::singleline(path).desired_width(420.0));
                     if let Some(pick) = &app.services.pick_open
-                        && cmd != "session.save_as"
-                        && cmd != "session.save_copy"
+                        && !saving_path(cmd)
                         && key != "dir"
                         && ui.button("Browse…").clicked()
                         && let Some(p) = pick(cmd, &[])
@@ -460,10 +460,10 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                         && ui.button("Browse…").clicked()
                         && let Some(p) = pick(path)
                     {
-                        *path = p;
+                        *path = if cmd == "file.export_exchange" { std::path::Path::new(&p).join(format!("{} Export", soundcraft_engine::io::sanitize_name(&app.engine.session().name))).to_string_lossy().into_owned() } else { p };
                     }
                     if let Some(pick) = &app.services.pick_save
-                        && (cmd == "session.save_as" || cmd == "session.save_copy")
+                        && saving_path(cmd)
                         && ui.button("Browse…").clicked()
                         && let Some(p) = pick(cmd, path)
                     {
@@ -816,4 +816,8 @@ mod tests {
             "Remove 2 files from the session? They are used by 4 clips on the timeline, which are removed too. The files stay on disk."
         );
     }
+}
+
+fn saving_path(id: &str) -> bool {
+    id.starts_with("session.save") || id.starts_with("file.export") || id.starts_with("track.save") || matches!(id, "file.print_score" | "file.send_to_sibelius")
 }

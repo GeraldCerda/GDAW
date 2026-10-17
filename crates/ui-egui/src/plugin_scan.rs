@@ -25,8 +25,11 @@ pub fn begin(rescan: bool) {
 }
 
 pub fn cache_dir() -> Option<PathBuf> {
-    let root = std::env::var_os("SOUNDCRAFT_CONFIG_DIR").filter(|value| !value.is_empty()).map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(if cfg!(target_os = "macos") { "Library/Application Support/GDAW" } else { ".cache/gdaw" })))?;
+    let root = match std::env::var_os("SOUNDCRAFT_CONFIG_DIR") {
+        Some(value) if value.is_empty() => return None,
+        Some(value) => PathBuf::from(value),
+        None => PathBuf::from(std::env::var_os("HOME")?).join(if cfg!(target_os = "macos") { "Library/Application Support/GDAW" } else { ".cache/gdaw" }),
+    };
     Some(root.join("PluginCache"))
 }
 
@@ -221,6 +224,91 @@ mod response_tests {
             assert_eq!(run_helper(&args), Some(0));
             let response: Result<Vec<serde_json::Value>, String> = serde_json::from_slice(&std::fs::read(&output).unwrap()).unwrap();
             assert!(response.is_err());
+        }
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CatalogCache {
+    version: u32,
+    platform: String,
+    inventory: u64,
+    plugins: Vec<crate::plugin_browser::BrowserPlugin>,
+    vst3: Vec<soundcraft_vst3_host::Vst3Descriptor>,
+    clap: Vec<soundcraft_clap_host::ClapDescriptor>,
+    au: Vec<soundcraft_au_host::AuDescriptor>,
+    #[serde(default)]
+    failures: Vec<(String, String)>,
+}
+
+fn platform() -> String { format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH) }
+
+fn inventory() -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut paths = soundcraft_vst3_host::scan::find_bundles(&soundcraft_vst3_host::scan::default_search_paths());
+    paths.extend(soundcraft_clap_host::scan::find_bundles(&soundcraft_clap_host::scan::default_search_paths()));
+    let mut roots = vec![PathBuf::from("/Library/Audio/Plug-Ins/Components"), PathBuf::from("/System/Library/Components"), PathBuf::from("/System/Library/Audio/Plug-Ins/Components")];
+    if let Some(home) = std::env::var_os("HOME") { roots.push(PathBuf::from(home).join("Library/Audio/Plug-Ins/Components")); }
+    if cfg!(target_os = "macos") {
+        for root in roots {
+            if let Ok(entries) = std::fs::read_dir(&root) { paths.extend(entries.flatten().take(16384).map(|entry| entry.path()).filter(|path| path.extension().is_some_and(|extension| extension == "component"))); }
+            paths.push(root);
+        }
+    }
+    paths.sort(); paths.dedup();
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    for path in paths {
+        path.hash(&mut hash);
+        let mut candidates = vec![path.clone(), path.join("Contents/Info.plist")];
+        candidates.extend(soundcraft_vst3_host::scan::bundle_binary(&path));
+        candidates.extend(soundcraft_clap_host::scan::bundle_executable(&path));
+        if path.extension().is_some_and(|extension| extension == "component") {
+            if let Ok(entries) = std::fs::read_dir(path.join("Contents/MacOS")) { candidates.extend(entries.flatten().take(64).map(|entry| entry.path())); }
+        }
+        candidates.sort();
+        for candidate in candidates {
+            candidate.hash(&mut hash);
+            if let Ok(metadata) = std::fs::metadata(candidate) { metadata.len().hash(&mut hash); metadata.modified().ok().hash(&mut hash); }
+        }
+    }
+    hash.finish()
+}
+
+pub fn restore_catalog() -> Option<(Vec<crate::plugin_browser::BrowserPlugin>, bool)> {
+    use std::io::Read;
+    let file = std::fs::File::open(cache_dir()?.join("catalog-v2.json")).ok()?;
+    let mut bytes = Vec::new();
+    file.take(16_777_217).read_to_end(&mut bytes).ok()?;
+    if bytes.len() > 16_777_216 { return None; }
+    let cached: CatalogCache = serde_json::from_slice(&bytes).ok()?;
+    if cached.version != 2 || cached.platform != platform() { return None; }
+    let unchanged = cached.inventory == inventory();
+    progress_state().lock().unwrap_or_else(std::sync::PoisonError::into_inner).failures = cached.failures;
+    soundcraft_vst3_host::restore_catalog(cached.vst3);
+    soundcraft_clap_host::restore_catalog(cached.clap);
+    soundcraft_au_host::restore_catalog(cached.au);
+    let mut plugins = crate::plugin_browser::built_in_catalog();
+    plugins.extend(cached.plugins.into_iter().filter(|plugin| plugin.format != crate::plugin_browser::PluginFormat::BuiltIn));
+    crate::plugin_browser::normalize(&mut plugins);
+    Some((plugins, unchanged))
+}
+
+pub fn save_catalog(plugins: &[crate::plugin_browser::BrowserPlugin]) {
+    let (Some(vst3), Some(clap), Some(au), Some(directory)) = (soundcraft_vst3_host::cached(), soundcraft_clap_host::cached(), soundcraft_au_host::cached(), cache_dir()) else { return };
+    let cache = CatalogCache { version: 2, platform: platform(), inventory: inventory(), plugins: plugins.to_vec(), vst3, clap, au, failures: progress().failures };
+    if let Ok(bytes) = serde_json::to_vec(&cache) {
+        if bytes.len() <= 16_777_216 && std::fs::create_dir_all(&directory).is_ok() {
+            let path = directory.join("catalog-v2.json");
+            let staged = directory.join(format!("catalog-v2.{}.partial", std::process::id()));
+            if std::fs::write(&staged, bytes).is_ok() { let _ = std::fs::rename(staged, path); }
+        }
+    }
+}
+
+pub fn retry_failed_scans() {
+    for (path, _) in progress().failures {
+        for format in ["--gdaw-scan-vst3", "--gdaw-scan-clap"] {
+            if let Some(cache) = cache_path(Path::new(&path), format) { let _ = std::fs::remove_file(cache); }
         }
     }
 }

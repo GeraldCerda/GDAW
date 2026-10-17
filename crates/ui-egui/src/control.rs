@@ -120,6 +120,14 @@ fn handle(app: &mut SoundApp, ctx: &egui::Context, req: &ControlRequest) -> Opti
             }
             ok(list)
         }
+        "engine.capabilities" => match app.engine.execute("engine.capabilities", p) { Ok(value) => ok(value), Err(error) => err(error) },
+        "library.search" => ok(crate::sample_browser::search(app, p.get("query").and_then(Value::as_str).unwrap_or(""), p.get("limit").and_then(Value::as_u64).unwrap_or(50).clamp(1, 200) as usize)),
+        "library.preview" => match p.get("path").and_then(Value::as_str) { Some(path) => match crate::sample_browser::preview(app, path) { Ok(()) => ok(json!({"queued": true})), Err(error) => err(error) }, None => err("path is required") },
+        "library.stop_preview" => { crate::sample_browser::stop(app); ok(json!({})) },
+        "plugins.status" => ok(json!({"available": app.browser.plugins, "unavailable": app.browser.unavailable, "scanning": app.browser.plugin_scan.is_some()})),
+        "plugins.retry" => match p.get("id").and_then(Value::as_str) { Some(id) => { crate::devices::retry_plugin(app, id); ok(json!({"retry": id})) }, None => err("id is required") },
+        "plugins.hide" => match p.get("id").and_then(Value::as_str) { Some(id) => { crate::devices::exclude_plugin(app, id, "Hidden through the developer API"); ok(json!({"hidden": id})) }, None => err("id is required") },
+        "export.status" => ok(json!({"running": app.exchange.is_some() || app.bounce.is_some(), "progress": app.exchange.as_ref().map(soundcraft_engine::exchange::Exchange::progress), "status": app.ui.status})),
         "engine.parity" => ok(crate::menus::parity()),
         "session.inspect" | "document.inspect" => {
             ok(soundcraft_engine::inspect::session(&app.engine, p.get("detail").and_then(Value::as_str) == Some("full")))

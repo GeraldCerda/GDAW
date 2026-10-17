@@ -56,8 +56,10 @@ pub(crate) fn content(app: &mut SoundApp, ui: &mut Ui) {
                 strip(app, ui, id, snap.as_ref(), height);
             }
             let rest = Rect::from_min_max(pos2(ui.cursor().min.x, ui.clip_rect().min.y), ui.clip_rect().max);
-            if rest.width() > 4.0 && ui.interact(rest, ui.id().with("past_strips"), Sense::click()).double_clicked() {
-                let _ = app.dialogs.open_for_command(&app.engine, "track.new");
+            if rest.width() > 4.0 {
+                let response = ui.interact(rest, ui.id().with("past_strips"), Sense::click());
+                if response.double_clicked() { let _ = app.dialogs.open_for_command(&app.engine, "track.new"); }
+                if let Some(item) = response.dnd_release_payload::<crate::devices::BrowserItem>() { crate::devices::new_track_drop(app, &item); }
             }
         });
     });
@@ -474,6 +476,7 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
         app.dialogs.open_rename_track(id, &track.name);
     }
     nresp.context_menu(|ui| crate::edit_window::track_context_menu(app, ui, id));
+    crate::devices::track_drop(app, id, &nresp);
     if app.ui.mix_views.iter().any(|v| v == "color") {
         ui.painter().rect_filled(Rect::from_min_size(pos2(r.min.x, r.max.y - 5.0), vec2(w, 5.0)), 0.0, rgb(track.color));
     }
@@ -550,8 +553,11 @@ pub(crate) fn insert_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: 
     let instrument = track.instrument_insert_slot() == Some(slot);
     let address = if instrument { soundcraft_mix::INSTRUMENT_SLOT } else { slot };
     let ins = if instrument { track.instrument.clone() } else { track.mixer.inserts.get(slot).cloned().flatten() };
-    let resp = ui.interact(r, ui.id().with(("ins", id.0, slot)), Sense::click());
+    let resp = ui.interact(r, ui.id().with(("ins", id.0, slot)), Sense::click_and_drag());
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Insert {}", (b'A' + slot as u8) as char)));
+    if let Some(insert) = &ins { resp.dnd_set_drag_payload(crate::devices::InsertDrag { track: id, slot, plugin: insert.plugin.clone() }); }
+    if resp.dnd_hover_payload::<crate::devices::InsertDrag>().is_some() || resp.dnd_hover_payload::<crate::devices::BrowserItem>().is_some() { ui.painter().rect_stroke(r, 2.0, Stroke::new(1.5, t.accent), StrokeKind::Inside); }
+    if let Some(source) = resp.dnd_release_payload::<crate::devices::InsertDrag>() { crate::devices::move_drop(app, id, slot, &source, ui.input(|input| input.modifiers.alt)); }
     let info = ins.as_ref().and_then(|i| plugin_info(&i.plugin));
     let name = ins.as_ref().map(|i| info.map_or(i.plugin.as_str(), |p| p.short_name)).unwrap_or_default();
     match &ins {

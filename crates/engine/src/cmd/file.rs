@@ -103,6 +103,16 @@ pub fn specs() -> Vec<CommandSpec> {
             let files = crate::io::bounce_stems_with(e, &dir, r, &soundcraft_audio_io::EncodeOptions { format, bit_depth, dither: true, bwf: None }, fold)?;
             Ok(json!({"files": files}))
         }),
+        cmd!(noundo "file.export_exchange", "WAV Tracks and MIDI...", ["File", "Export"], None, "{dir, start?, end?} — aligned 24-bit WAV tracks, reference mix, Standard MIDI and an exchange manifest in a new folder", has_tracks, |e, p| crate::exchange::Exchange::new(e, p)?.run()),
+        cmd!(noundo "file.export_project", "Portable GDAW Project...", ["File", "Export"], None, "{path, replace?: false} — native session and decoded audio in a .gdawz project", always, |e, p| {
+            let path = str_param(p, "path").ok_or_else(|| bad("file.export_project", "path is required"))?;
+            let target = crate::io::project_file(path)?;
+            crate::file_access::check_write(&target).map_err(EngineError::Io)?;
+            if target.exists() && !bool_or(p, "replace", false) { return Err(bad("file.export_project", "Destination exists; choose another name or pass replace: true")); }
+            let path = target.to_string_lossy().into_owned();
+            let media = crate::io::export_project(e, &path)?;
+            Ok(json!({"path": path, "media_files": media, "format": "gdawz"}))
+        }),
         cmd!(noundo "file.export_midi", "MIDI...", ["File", "Export"], None, "{path, tracks?}", always, |e, p| {
             let path = str_param(p, "path").ok_or_else(|| bad("file.export_midi", "`path` required"))?.to_string();
             let only = if p.get("tracks").is_some() || p.get("track").is_some() { Some(tracks_param(e, "file.export_midi", p)?) } else { None };
