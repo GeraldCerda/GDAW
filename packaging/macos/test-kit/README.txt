@@ -1,4 +1,4 @@
-GDAW Mac Test Kit v9 — source candidate
+GDAW Mac Test Kit v10 — source candidate
 
 Repository: https://github.com/GeraldCerda/GDAW
 Exact package revision: SOURCE_COMMIT beside this file.
@@ -13,6 +13,7 @@ The normal command runs no regression suites. It builds the native Mac applicati
 The installed app records the exact source revision as GDAWBuildCommit in Contents/Info.plist. Preferences use ~/Library/Application Support/GDAW Test. Build and launch logs use this kit's logs directory.
 
 Source changes in this candidate:
+- Fixes the developer-panel Context borrow error reported in build-20261017-110107.log. That log contains one Rust compiler diagnostic (E0308); compilation stopped before installation. This revision has not been rebuilt here.
 - Drag plugins from the browser onto inserts, track headers and empty track space. Drag existing insert cells or device titles to reorder within a track or swap between tracks. Option-drag copies into an empty slot. Plugin state, parameter automation and plugin bus assignments move together. Instrument tracks still hold one instrument. Moving a hosted device recreates its affected instances; uninterrupted audio during moves is not established.
 - Add up to 64 sample-library locations, search a background index, keep favorites and recent imports, drag samples into tracks or the timeline, and audition without moving the song playhead. Preview has its own gain, background decoding and Stop control. It reads at most 128 MiB per source, decodes up to 30 seconds with a sample bound, and does not tempo-warp. Indexing caps are 100,000 samples, 500,000 visited entries and 24 directory levels; descendant symlinks are skipped. Use Refresh for changes made while GDAW is open.
 - Persistent platform-specific plugin catalogs now restore the host registries as well as the picker. Unchanged installations skip plugin enumeration on later starts. Changed installations refresh in the background using descriptor caches; Rescan Plugins explicitly refreshes everything. First discovery retains the progress screen. Cache paths honor SOUNDCRAFT_CONFIG_DIR; an empty value disables caching.

@@ -1476,7 +1476,7 @@ impl SoundApp {
             return;
         }
         if crate::devices::startup(self, ui) { return; }
-        crate::developer_panel::show(self, ctx);
+        crate::developer_panel::show(self, &ctx);
         if self.arrange_request {
             self.arrange_request = false;
             ctx.memory_mut(|m| m.reset_areas());
