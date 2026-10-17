@@ -535,9 +535,9 @@ fn loop_brace(app: &mut SoundApp, ui: &mut Ui, area: Rect, tl: Rect) {
         let id = ui.id().with(("loop_brace", part));
         let response = ui.interact(hit, id, if app.engine.transport.recording { Sense::hover() } else { Sense::click_and_drag() });
         if response.drag_started() { ui.ctx().data_mut(|data| data.insert_temp(id, range)); }
-        if response.dragged() {
+        if response.dragged() && let Some(drag_delta) = response.total_drag_delta() {
             let original = ui.ctx().data(|data| data.get_temp::<Range>(id)).unwrap_or(range);
-            let delta = soundcraft_time::to_samples(f64::from(response.total_drag_delta().x) * s.edit.zoom.samples_per_px);
+            let delta = soundcraft_time::to_samples(f64::from(drag_delta.x) * s.edit.zoom.samples_per_px);
             let (start, end) = match part {
                 "left" => (snap(&s, original.start.saturating_add(delta).max(0)).min(original.end - 1), original.end),
                 "right" => (original.start, snap(&s, original.end.saturating_add(delta)).max(original.start.saturating_add(1))),

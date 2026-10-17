@@ -1,4 +1,4 @@
-GDAW Mac Test Kit v12 — source candidate
+GDAW Mac Test Kit v13 — source candidate
 
 Repository: https://github.com/GeraldCerda/GDAW
 Exact package revision: SOURCE_COMMIT beside this file.
@@ -13,6 +13,7 @@ The normal command runs no regression suites. It builds the native Mac applicati
 The installed app records the exact source revision as GDAWBuildCommit in Contents/Info.plist. Preferences use ~/Library/Application Support/GDAW Test. Build and launch logs use this kit's logs directory.
 
 Source changes in this candidate:
+- Fixes the single compiler diagnostic in build-20261017-143635.log: E0609 in the Arrangement loop brace. egui's total_drag_delta returns Option<Vec2>; the brace now applies movement only when a drag delta is present. It uses no unwrap and preserves total displacement across the drag. The v12 Mac build stopped at this diagnostic before signing, installation or launch; no regression suites ran. This correction has not been compiled here, so further compiler errors or runtime defects have not been ruled out.
 - Replaces the previous bottom control cards with a full-width Device View: resizable left track-info pane, narrow plugin wrappers with compact headers, large X/Y pads, two parameter selectors, optional configured-control panels and a blank effects drop area. The same chain appears below Edit and Mix; the Pro Tools-style Edit insert columns, mixer strips and existing grey palette remain. The screenshot is a layout reference, not a bundled asset. This layout has not been rendered here.
 - X/Y controls write actual normalized plugin parameters, including native-editor synchronization. Axis assignments and up to 64 configured controls are saved per device in the session and follow moves/copies. Configure can expose parameters chosen in the list or touched in a native editor. Compact header controls activate/bypass, expose parameters, open the editor, select a Browser replacement and load/save existing parameter presets. These presets still contain host parameters rather than complete opaque third-party state.
 - Browser replacement checks that its target has not changed, clears automation and plugin bus assignments belonging to the replaced device, and recreates affected hosted instances. Replacement is one engine undo command; native state capture can add its own preceding undo entries. The ten-position insert limit and one-instrument-per-instrument-track limit remain.
