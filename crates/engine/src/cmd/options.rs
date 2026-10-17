@@ -18,10 +18,10 @@ macro_rules! toggle {
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
-        toggle!("options.loop_record", "Loop Record", ["Options"], Some("Alt+L"), loop_record),
+        cmd!(noundo "options.loop_record", "Loop Record", ["Options"], Some("Alt+L"), "{value?: bool}", always, |e, p| super::transport::set_loop(e, &json!({"enabled": p.get("value")}))),
         toggle!("options.quickpunch", "QuickPunch", ["Options"], Some("Cmd+Shift+P"), quickpunch),
         toggle!("options.pre_post_roll", "Pre/Post-Roll", ["Options"], Some("Cmd+K"), pre_post_roll),
-        toggle!("options.loop_playback", "Loop Playback", ["Options"], Some("Cmd+Shift+L"), loop_playback),
+        cmd!(noundo "options.loop_playback", "Loop Playback", ["Options"], Some("Cmd+Shift+L"), "{value?: bool}", always, |e, p| super::transport::set_loop(e, &json!({"enabled": p.get("value")}))),
         toggle!("options.link_timeline_edit", "Link Timeline and Edit Selection", ["Options"], Some("Shift+/"), link_timeline_edit),
         toggle!("options.link_track_edit", "Link Track and Edit Selection", ["Options"], Some("Shift+T"), link_track_edit),
         toggle!("options.insertion_follows_playback", "Insertion Follows Playback", ["Options"], Some("Ctrl+N"), insertion_follows_playback),

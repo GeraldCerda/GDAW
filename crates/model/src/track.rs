@@ -274,6 +274,7 @@ impl Track {
         let mut mixer = Mixer::new(format);
         if kind == TrackKind::Audio {
             mixer.input = crate::Route::Hardware("In 1".into());
+            mixer.monitor_mode = Some(crate::MonitorMode::Auto);
         }
         Track {
             id,

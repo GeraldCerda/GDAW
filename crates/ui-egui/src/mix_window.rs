@@ -17,7 +17,7 @@ pub fn strip_width(narrow: bool) -> f32 {
 
 pub fn show(app: &mut SoundApp, ui: &mut Ui) {
     if app.ui.show_devices {
-        egui::Panel::bottom("mix_track_devices").default_size(230.0).resizable(true).frame(egui::Frame::NONE.fill(Tokens::current().panel_bg)).show(ui, |ui| ui.push_id("mix_device_chain", |ui| crate::devices::chain(app, ui)));
+        egui::Panel::bottom("mix_track_devices").default_size(280.0).resizable(true).frame(egui::Frame::NONE.fill(Tokens::current().panel_bg)).show(ui, |ui| ui.push_id("mix_device_chain", |ui| crate::devices::chain(app, ui)));
     }
     crate::docking::show(app, ui, crate::MainWindow::Mix);
 }
@@ -385,7 +385,7 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
             let _ = app.run("mix.input_monitor", json!({"track": id.0}));
         }
         if rec_toggle(&mut row, vec2(bw, 18.0), track.mixer.record_arm, "Record enable").clicked() {
-            let _ = app.run("mix.record_arm", json!({"track": id.0}));
+            let _ = app.run("mix.record_arm", json!({"track": id.0, "exclusive": !row.input(|input| input.modifiers.command)}));
         }
     }
     y += 22.0;

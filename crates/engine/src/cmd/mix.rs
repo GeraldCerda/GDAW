@@ -43,22 +43,44 @@ pub fn specs() -> Vec<CommandSpec> {
             }
             Ok(json!({}))
         }),
-        cmd!("mix.record_arm", "Record Enable", [], Some("Shift+R"), "{tracks?, value?: bool}", has_selection, |e, p| toggle(
-            e,
-            p,
-            "mix.record_arm",
-            |s, t, v| set_grouped(s, t, "record", |tr| if tr.kind.has_playlist() {
-                tr.mixer.record_arm = v
-            }),
-            |tr| tr.mixer.record_arm
-        )),
+        cmd!("mix.record_arm", "Record Enable", [], Some("Shift+R"), "{tracks?, value?: bool, exclusive?: bool}", has_selection, |e, p| {
+            let tracks = tracks_required(e, "mix.record_arm", p)?;
+            let value = p.get("value").and_then(Value::as_bool).unwrap_or_else(|| !tracks.iter().all(|track| e.session().track(*track).is_some_and(|track| track.mixer.record_arm)));
+            if value && bool_or(p, "exclusive", false) { for track in &mut e.session_mut().tracks { track.mixer.record_arm = false; } }
+            let mut params = p.clone();
+            params["value"] = json!(value);
+            toggle(
+                e,
+                &params,
+                "mix.record_arm",
+                |s, t, v| set_grouped(s, t, "record", |tr| if tr.kind.has_playlist() {
+                    tr.mixer.record_arm = v
+                }),
+                |tr| tr.mixer.record_arm
+            )
+        }),
+        cmd!("mix.monitor_mode", "Track Monitor Mode", [], None, "{tracks?, mode: in|auto|off}", has_selection, |e, p| {
+            let mode = match str_param(p, "mode") {
+                Some("in") => soundcraft_model::MonitorMode::In,
+                Some("auto") => soundcraft_model::MonitorMode::Auto,
+                Some("off") => soundcraft_model::MonitorMode::Off,
+                _ => return Err(bad("mix.monitor_mode", "mode must be in, auto or off")),
+            };
+            let tracks = tracks_required(e, "mix.monitor_mode", p)?;
+            for track in tracks { if let Some(track) = e.session_mut().track_mut(track) {
+                track.mixer.monitor_mode = Some(mode);
+                track.mixer.input_monitor = mode == soundcraft_model::MonitorMode::In;
+            } }
+            Ok(json!({"mode": mode}))
+        }),
         cmd!("mix.input_monitor", "Input Monitoring", [], Some("Shift+I"), "{tracks?, value?: bool}", has_selection, |e, p| toggle(
             e,
             p,
             "mix.input_monitor",
             |s, t, v| {
                 if let Some(tr) = s.track_mut(t) {
-                    tr.mixer.input_monitor = v
+                    tr.mixer.input_monitor = v;
+                    tr.mixer.monitor_mode = Some(if v { soundcraft_model::MonitorMode::In } else { soundcraft_model::MonitorMode::Off });
                 }
             },
             |tr| tr.mixer.input_monitor
@@ -96,9 +118,11 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         cmd!("mix.insert", "Insert Plugin", [], None, "{track?, slot?: 0..9 | a..j, plugin: id, params?: {id: value}}", has_selection, insert),
         cmd!("mix.insert_before", "Insert Device Before", [], None, "{track?, before: 0..10, plugin: id, params?: {id: value}}", has_selection, insert_before),
+        cmd!("mix.device_replace", "Replace Device", [], None, "{track?, slot, plugin, expected_plugin, params?}", has_selection, device_replace),
         cmd!("mix.insert_remove", "Remove Insert", [], None, "{track?, slot}", has_selection, insert_remove),
         cmd!("mix.insert_bypass", "Bypass Insert", [], None, "{track?, slot, value?: bool}", has_selection, insert_bypass),
         cmd!("mix.insert_param", "Set Plugin Parameter", [], None, "{track?, slot, param, value}", has_selection, insert_param),
+        cmd!("mix.device_controls", "Device Controls", [], None, "{track?, slot, x?: parameter|null, y?: parameter|null, parameters?: [parameter]}", has_selection, device_controls),
         cmd!("mix.plugin_routing", "Plugin Routing", [], None, "{track?, slot, sidechain?: bus id|null, output?: 1..15, target?: bus id|null}", has_selection, plugin_routing),
         cmd!(
             "mix.insert_params",
@@ -377,6 +401,30 @@ fn insert_before(e: &mut Engine, p: &Value) -> Result<Value> {
     crate::insert_drag::move_insert(e, &json!({"track": track.0, "from": from, "to": to}))
 }
 
+fn device_replace(e: &mut Engine, p: &Value) -> Result<Value> {
+    let id = "mix.device_replace";
+    let (track, slot) = track_slot(e, p, id, INSERT_SLOTS)?;
+    let model = e.session().track(track).ok_or_else(|| bad(id, "missing track"))?;
+    let was_instrument = model.instrument_insert_slot() == Some(slot);
+    let old = if was_instrument { model.instrument.as_ref() } else { model.mixer.inserts.get(slot).and_then(Option::as_ref) };
+    let old = old.ok_or_else(|| bad(id, "replacement target is empty"))?;
+    if str_param(p, "expected_plugin") != Some(old.plugin.as_str()) { return Err(bad(id, "replacement target changed")); }
+    let mut params = p.clone();
+    if let Some(object) = params.as_object_mut() { object.remove("expected_plugin"); }
+    let result = insert(e, &params)?;
+    let session = e.session_mut();
+    let model = session.track_mut(track).ok_or_else(|| bad(id, "missing track"))?;
+    let instrument = model.instrument_insert_slot() == Some(slot);
+    model.automation.retain(|lane| !matches!(lane.param, AutoParam::Plugin { slot: index, .. } if usize::from(index) == slot));
+    let sidechain = format!("plugin_sidechain.{}.{slot}", track.0);
+    let output = format!("plugin_output.{}.{slot}.", track.0);
+    session.edit.values.retain(|key, _| key != &sidechain && !key.starts_with(&output));
+    let mut result = result;
+    result["slot"] = json!(slot);
+    result["reset"] = json!([{"track": track.0, "slot": slot, "instrument": was_instrument}, {"track": track.0, "slot": slot, "instrument": instrument}]);
+    Ok(result)
+}
+
 fn insert_remove(e: &mut Engine, p: &Value) -> Result<Value> {
     let (t, slot) = track_slot(e, p, "mix.insert_remove", INSERT_SLOTS + 1)?;
     if let Some(track) = e.session_mut().track_mut(t)
@@ -424,14 +472,13 @@ fn insert_param(e: &mut Engine, p: &Value) -> Result<Value> {
 /// Apply many parameters at once (preset recall); values are clamped. Unknown ids and
 /// non-numeric values are errors, not silent no-ops: a typo must not look like success.
 fn insert_params(e: &mut Engine, p: &Value) -> Result<Value> {
-    let (t, slot) = track_slot(e, p, "mix.insert_params", INSERT_SLOTS)?;
+    let (t, slot) = track_slot(e, p, "mix.insert_params", INSERT_SLOTS + 1)?;
     let obj = p.get("params").and_then(Value::as_object).cloned().ok_or_else(|| bad("mix.insert_params", "`params` must be an object"))?;
     let preset = str_param(p, "preset").map(str::to_string);
     let s = e.session_mut();
     let ins = s
         .track_mut(t)
-        .and_then(|tr| tr.mixer.inserts.get_mut(slot))
-        .and_then(Option::as_mut)
+        .and_then(|track| if track.instrument_insert_slot() == Some(slot) { track.instrument.as_mut() } else { track.mixer.inserts.get_mut(slot).and_then(Option::as_mut) })
         .ok_or_else(|| bad("mix.insert_params", "empty slot"))?;
     let info = super::clap::plugin_info(&ins.plugin).ok_or_else(|| bad("mix.insert_params", "unknown plugin"))?;
     let mut unknown: Vec<&str> = Vec::new();
@@ -462,6 +509,38 @@ fn insert_params(e: &mut Engine, p: &Value) -> Result<Value> {
         ins.preset = name;
     }
     Ok(json!({"set": n}))
+}
+
+fn device_controls(e: &mut Engine, p: &Value) -> Result<Value> {
+    let id = "mix.device_controls";
+    let (track, slot) = track_slot(e, p, id, INSERT_SLOTS + 1)?;
+    let insert = e.session_mut().track_mut(track)
+        .and_then(|track| if track.instrument_insert_slot() == Some(slot) { track.instrument.as_mut() } else { track.mixer.inserts.get_mut(slot).and_then(Option::as_mut) })
+        .ok_or_else(|| bad(id, "empty slot"))?;
+    let info = super::clap::plugin_info(&insert.plugin).ok_or_else(|| bad(id, "unknown plugin"))?;
+    let mut controls = insert.controls.clone();
+    for (key, target) in [("x", &mut controls.x), ("y", &mut controls.y)] {
+        if let Some(value) = p.get(key) {
+            *target = if value.is_null() { None } else {
+                let name = value.as_str().filter(|name| info.params.iter().any(|parameter| parameter.id == *name))
+                    .ok_or_else(|| bad(id, format!("invalid {key} parameter")))?;
+                Some(name.to_string())
+            };
+        }
+    }
+    if controls.x.is_some() && controls.x == controls.y { return Err(bad(id, "X and Y must use different parameters")); }
+    if let Some(value) = p.get("parameters") {
+        let names = value.as_array().filter(|names| names.len() <= 64).ok_or_else(|| bad(id, "parameters must contain at most 64 ids"))?;
+        let mut parameters = Vec::new();
+        for name in names {
+            let name = name.as_str().filter(|name| info.params.iter().any(|parameter| parameter.id == *name))
+                .ok_or_else(|| bad(id, "unknown parameter"))?;
+            if !parameters.iter().any(|parameter| parameter == name) { parameters.push(name.to_string()); }
+        }
+        controls.parameters = parameters;
+    }
+    insert.controls = controls;
+    Ok(json!({"controls": insert.controls}))
 }
 
 fn insert_move(e: &mut Engine, p: &Value) -> Result<Value> { crate::insert_drag::move_insert(e, p) }

@@ -63,6 +63,8 @@ pub enum TransportRequest {
     Stop,
     TogglePlay,
     Record,
+    RecordArm,
+    Loop(Option<soundcraft_time::Range>),
     Locate(Samples),
     PlaySelection,
     Pause,
@@ -77,6 +79,7 @@ pub enum TransportRequest {
 pub struct TransportStatus {
     pub playing: bool,
     pub recording: bool,
+    pub record_ready: bool,
     pub position: Samples,
 }
 

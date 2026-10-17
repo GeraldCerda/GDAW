@@ -80,6 +80,7 @@ enum Cmd {
         looped: Option<Range>,
     },
     Stop,
+    Loop(Option<Range>),
     Locate(Samples),
 }
 
@@ -461,12 +462,13 @@ impl AudioState {
                     self.audition_frames = 0;
                     self.pos = from;
                     self.end = end;
-                    self.looped = looped.filter(|r| r.len() > 64);
+                    self.looped = looped.filter(|r| r.len() > 0);
                     self.playing = true;
                     self.pending_len = 0;
                     self.read = 0.0;
                     self.mix.reset();
                 }
+                Cmd::Loop(range) => self.looped = range.filter(|range| range.len() > 0),
                 Cmd::Stop => {
                     self.audition_frames = 0;
                     self.playing = false;
@@ -1062,6 +1064,10 @@ impl Player {
         self.shared.position.store(from, Ordering::Relaxed);
         self.shared.playing.store(true, Ordering::Relaxed);
         let _ = self.send(Cmd::Play { from, end, looped });
+    }
+
+    pub fn set_loop(&self, range: Option<Range>) {
+        let _ = self.send(Cmd::Loop(range));
     }
 
     /// Feed live input (from a `record::Recorder`) into the mix for input monitoring.

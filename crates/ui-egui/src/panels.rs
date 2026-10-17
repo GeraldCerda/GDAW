@@ -664,7 +664,7 @@ fn preset_dir(app: &SoundApp, plugin: &str) -> Option<std::path::PathBuf> {
     app.preset_dir.as_ref().map(|d| d.join(crate::preset_folder_name(plugin)))
 }
 
-fn preset_menu(
+pub(crate) fn preset_menu(
     app: &mut SoundApp,
     ui: &mut Ui,
     tid: soundcraft_model::TrackId,

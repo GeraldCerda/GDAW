@@ -438,9 +438,19 @@ impl Route {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct DeviceControls {
+    pub x: Option<String>,
+    pub y: Option<String>,
+    pub parameters: Vec<String>,
+}
+
 /// A plugin instance on an insert slot.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Insert {
+    #[serde(default)]
+    pub controls: DeviceControls,
     /// Registry id from `soundcraft-dsp` (e.g. `eq7`, `comp`).
     pub plugin: String,
     #[serde(default, deserialize_with = "finite_params")]
@@ -472,6 +482,7 @@ fn yes() -> bool {
 impl Insert {
     pub fn new(plugin: impl Into<String>) -> Self {
         Insert {
+            controls: DeviceControls::default(),
             plugin: plugin.into(),
             params: BTreeMap::new(),
             bypass: false,
@@ -516,6 +527,10 @@ impl SendSlot {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MonitorMode { In, Auto, Off }
+
 /// The channel strip.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Mixer {
@@ -530,6 +545,8 @@ pub struct Mixer {
     pub record_arm: bool,
     #[serde(default)]
     pub input_monitor: bool,
+    #[serde(default)]
+    pub monitor_mode: Option<MonitorMode>,
     #[serde(default)]
     pub phase_invert: bool,
     pub input: Route,
@@ -563,6 +580,7 @@ impl Mixer {
             solo_safe: false,
             record_arm: false,
             input_monitor: false,
+            monitor_mode: None,
             phase_invert: false,
             input: Route::None,
             output: Route::Main,
@@ -572,6 +590,15 @@ impl Mixer {
             trim_db: 0.0,
             vca: None,
             surround: None,
+        }
+    }
+
+    pub fn monitors_input(&self, recording: bool, playing: bool, has_clip: bool) -> bool {
+        match self.monitor_mode {
+            Some(MonitorMode::In) => true,
+            Some(MonitorMode::Off) => false,
+            Some(MonitorMode::Auto) => self.input_monitor || (self.record_arm && (recording || !playing || !has_clip)),
+            None => self.input_monitor,
         }
     }
 

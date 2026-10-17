@@ -108,11 +108,11 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
     egui::Panel::top("edit_toolbar").exact_size(toolbar::HEIGHT).frame(egui::Frame::NONE.fill(t.toolbar_bg)).show(ui, |ui| toolbar::show(app, ui));
     egui::Panel::bottom("edit_status").exact_size(22.0).frame(egui::Frame::NONE.fill(t.toolbar_bg)).show(ui, |ui| status_bar(app, ui));
     egui::Panel::bottom("lower_dock_tabs").exact_size(22.0).frame(egui::Frame::NONE.fill(t.panel_bg2)).show(ui, |ui| dock_tabs(app, ui));
+    if app.ui.show_devices {
+        egui::Panel::bottom("track_devices").default_size(280.0).resizable(true).frame(egui::Frame::NONE.fill(t.panel_bg2)).show(ui, |ui| crate::devices::chain(app, ui));
+    }
     if app.ui.show_browser {
         egui::Panel::left("device_browser").default_size(260.0).resizable(true).frame(egui::Frame::NONE.fill(t.panel_bg)).show(ui, |ui| crate::devices::browser(app, ui));
-    }
-    if app.ui.show_devices {
-        egui::Panel::bottom("track_devices").default_size(230.0).resizable(true).frame(egui::Frame::NONE.fill(t.panel_bg2)).show(ui, |ui| crate::devices::chain(app, ui));
     }
     if app.ui.show_universe {
         egui::Panel::top("universe").exact_size(64.0).frame(egui::Frame::NONE.fill(Tokens::current().universe_bg)).show(ui, |ui| universe(app, ui));
@@ -234,7 +234,7 @@ fn main_area_content(app: &mut SoundApp, ui: &mut Ui) {
     }
     let cols = edit_columns(app.engine.session());
     let titles_h = if cols.is_empty() { 0.0 } else { COLUMN_TITLES_H };
-    let rulers_h = rulers.iter().map(|r| ruler_height(r)).sum::<f32>() + 6.0 + titles_h;
+    let rulers_h = rulers.iter().map(|r| ruler_height(r)).sum::<f32>() + 28.0 + titles_h;
     let hscroll_h = 14.0;
     let hw = header_width(&cols);
     let header = Rect::from_min_max(full.min, pos2(full.min.x + hw, full.max.y - hscroll_h));
@@ -505,13 +505,58 @@ fn nice_step(spp: f64, sr: f64, min_px: f64) -> i64 {
     (3600.0 * sr) as i64
 }
 
+fn loop_brace(app: &mut SoundApp, ui: &mut Ui, area: Rect, tl: Rect) {
+    let s = app.engine.session_arc();
+    let tokens = Tokens::current();
+    let row = Rect::from_min_max(pos2(tl.min.x, area.min.y + 2.0), pos2(tl.max.x, area.min.y + 22.0));
+    let label = Rect::from_min_max(pos2(area.min.x + 8.0, row.min.y), pos2(tl.min.x - 8.0, row.max.y));
+    ui.painter().text(label.left_center(), Align2::LEFT_CENTER, "Loop", regular(11.0), tokens.text_dim);
+    let set = ui.interact(label, ui.id().with("loop_from_selection"), Sense::click());
+    if set.on_hover_text("Click to set the loop brace to your time selection (Cmd+L)").clicked() {
+        let _ = app.run("transport.loop", json!({"selection": true}));
+    }
+    let Some(range) = s.edit.arrangement_loop.filter(|range| range.len() > 0) else { return };
+    let brace = Rect::from_min_max(pos2(x_of(&s, tl, range.start), row.min.y + 1.0), pos2(x_of(&s, tl, range.end), row.max.y - 1.0));
+    let painter = ui.painter().with_clip_rect(row);
+    let color = if s.edit.loop_playback { tokens.accent } else { tokens.text_dim };
+    painter.rect(brace, 1.0, tokens.panel_bg2, Stroke::new(1.0, color), StrokeKind::Inside);
+    for (edge, x) in [("left", brace.min.x), ("right", brace.max.x)] {
+        let direction = if edge == "left" { 1.0 } else { -1.0 };
+        painter.line_segment([pos2(x, brace.min.y), pos2(x + 7.0 * direction, brace.center().y)], Stroke::new(1.0, color));
+        painter.line_segment([pos2(x + 7.0 * direction, brace.center().y), pos2(x, brace.max.y)], Stroke::new(1.0, color));
+    }
+    for (part, hit) in [
+        ("body", brace.shrink2(vec2(7.0, 0.0))),
+        ("left", Rect::from_min_max(brace.min - vec2(3.0, 0.0), pos2(brace.min.x + 6.0, brace.max.y))),
+        ("right", Rect::from_min_max(pos2(brace.max.x - 6.0, brace.min.y), brace.max + vec2(3.0, 0.0))),
+    ] {
+        let hit = hit.intersect(row);
+        if hit.width() <= 0.0 { continue; }
+        let id = ui.id().with(("loop_brace", part));
+        let response = ui.interact(hit, id, if app.engine.transport.recording { Sense::hover() } else { Sense::click_and_drag() });
+        if response.drag_started() { ui.ctx().data_mut(|data| data.insert_temp(id, range)); }
+        if response.dragged() {
+            let original = ui.ctx().data(|data| data.get_temp::<Range>(id)).unwrap_or(range);
+            let delta = soundcraft_time::to_samples(f64::from(response.total_drag_delta().x) * s.edit.zoom.samples_per_px);
+            let (start, end) = match part {
+                "left" => (snap(&s, original.start.saturating_add(delta).max(0)).min(original.end - 1), original.end),
+                "right" => (original.start, snap(&s, original.end.saturating_add(delta)).max(original.start.saturating_add(1))),
+                _ => { let start = snap(&s, original.start.saturating_add(delta).max(0)); (start, start.saturating_add(original.len())) },
+            };
+            let _ = app.run("transport.loop", json!({"start": start, "end": end, "enabled": s.edit.loop_playback}));
+        }
+        response.on_hover_text(if app.engine.transport.recording { "Finish recording before changing the loop brace" } else if part == "body" { "Drag to move the loop" } else { "Drag to resize the loop" });
+    }
+}
+
 fn draw_rulers(app: &mut SoundApp, ui: &mut Ui, area: Rect, tl: Rect, rulers: &[String]) {
     let t = Tokens::current();
     let s = app.engine.session_arc();
     ui.painter().rect_filled(area, 0.0, t.ruler_bg);
     let view = Range::new(sample_at(&s, tl, tl.min.x), sample_at(&s, tl, tl.max.x));
     let sr = s.sample_rate;
-    let mut y0 = area.min.y + 3.0;
+    loop_brace(app, ui, area, tl);
+    let mut y0 = area.min.y + 25.0;
     for (i, id) in rulers.iter().enumerate() {
         let h = ruler_height(id);
         let row = Rect::from_min_max(pos2(tl.min.x, y0), pos2(tl.max.x, y0 + h));
@@ -1082,7 +1127,7 @@ fn track_header(app: &mut SoundApp, ui: &mut Ui, track: &Track, head: Rect, sele
         ];
         for (i, (key, lit, implied, cmd, shown)) in keys.into_iter().enumerate() {
             if shown && header_toggle(ui, at(23.0 + i as f32 * 26.0, 20.0, 16.0, 16.0), id, key, lit, implied).clicked() {
-                let _ = app.run(cmd, json!({"track": id.0}));
+                let _ = app.run(cmd, json!({"track": id.0, "exclusive": cmd == "mix.record_arm" && !ui.input(|input| input.modifiers.command)}));
             }
         }
     }
@@ -1614,9 +1659,14 @@ fn draw_live_take(app: &SoundApp, painter: &egui::Painter, s: &Session, track: &
     let Some(take) = rec.live_take(track.id) else { return };
     let block_len = soundcraft_playback::record::LIVE_BLOCK as f64 * s.sample_rate.as_f64() / f64::from(rec.sample_rate.max(1));
     let len = soundcraft_time::to_samples(take.first().map_or(0, Vec::len) as f64 * block_len);
-    let sel = s.edit.selection;
-    let (start, pass) = if s.edit.loop_record && !sel.is_empty() { (sel.start, Some(sel.len())) } else { (app.record_start, None) };
-    let Some((origin, span)) = soundcraft_engine::io::live_span(start, pass, app.punch, len) else { return };
+    let plan = app.take_plan.as_ref();
+    let start = plan.map_or(app.record_start, |plan| plan.start);
+    let span = if let Some(cycle) = plan.and_then(|plan| plan.cycle) {
+        soundcraft_engine::io::live_cycle_span(start, cycle, len)
+    } else {
+        soundcraft_engine::io::live_span(start, plan.and_then(|plan| plan.pass), app.punch, len)
+    };
+    let Some((origin, span)) = span else { return };
     let r = Rect::from_min_max(pos2(x_of(s, tl, span.start), lane.min.y + 1.0), pos2(x_of(s, tl, span.end), lane.max.y - 1.0));
     let t = Tokens::current();
     let (body, _, wave) = clip_colors([t.rec.r(), t.rec.g(), t.rec.b()], false);

@@ -110,6 +110,14 @@ fn command_for(key: Key, mods: Modifiers, mac: bool) -> Option<&'static str> {
 fn fixed(app: &mut SoundApp, key: Key, m: Modifiers, mac: bool) -> bool {
     let plain = !m.command && !m.alt && !m.ctrl && !m.shift;
     match key {
+        Key::F9 if !m.command && !m.alt && !m.ctrl => {
+            let _ = app.run("transport.record", json!({"start_playback": !m.shift}));
+            true
+        }
+        Key::L if m.command && !m.shift && !m.alt => {
+            let _ = app.run("transport.loop", json!({"selection": true}));
+            true
+        }
         Key::Space if !m.command && !m.alt => {
             let id = if m.shift { "transport.half_speed" } else { "transport.toggle" };
             let _ = app.run(id, json!({}));
@@ -219,7 +227,7 @@ fn fixed(app: &mut SoundApp, key: Key, m: Modifiers, mac: bool) -> bool {
             cycle_edit_mode(app);
             true
         }
-        Key::F5 | Key::F6 | Key::F7 | Key::F8 | Key::F9 | Key::F10 if plain => {
+        Key::F5 | Key::F6 | Key::F7 | Key::F8 | Key::F10 if plain => {
             let held = |other| app.docking_context.as_ref().is_some_and(|ctx| ctx.input(|input| input.key_down(other)));
             let tool = if matches!(key, Key::F6 | Key::F7 | Key::F8)
                 && ((key == Key::F6 && held(Key::F7)) || (key == Key::F7 && (held(Key::F6) || held(Key::F8))) || (key == Key::F8 && held(Key::F7)))
@@ -230,7 +238,6 @@ fn fixed(app: &mut SoundApp, key: Key, m: Modifiers, mac: bool) -> bool {
                 Key::F6 => "trim",
                 Key::F7 => "selector",
                 Key::F8 => "grabber",
-                Key::F9 => "scrubber",
                 _ => "pencil",
             }};
             let _ = app.run("edit.tool", json!({"tool": tool}));

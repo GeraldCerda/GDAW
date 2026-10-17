@@ -37,6 +37,7 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
                 counters(app, ui);
                 grid_nudge(app, ui);
                 transport(app, ui);
+                loop_range(app, ui);
                 tempo_meter(app, ui);
                 output_meter(app, ui);
             });
@@ -320,8 +321,8 @@ fn transport(app: &mut SoundApp, ui: &mut Ui) {
             ui.spacing_mut().item_spacing = vec2(3.0, 4.0);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 3.0;
-                if icon_button(ui, vec2(38.0, 28.0), "loop", looped, "Loop Playback (Cmd+Shift+L)").clicked() {
-                    let _ = app.run("options.loop_playback", json!({}));
+                if icon_button(ui, vec2(38.0, 28.0), "loop", looped, "Arrangement Loop · Cmd+L sets the brace to your selection").clicked() {
+                    let _ = app.run("transport.loop", json!({}));
                 }
                 let (r, resp) = ui.allocate_exact_size(vec2(38.0, 28.0), Sense::click());
                 key(ui.painter(), r, &resp, key_fill(&resp));
@@ -336,16 +337,16 @@ fn transport(app: &mut SoundApp, ui: &mut Ui) {
                     let _ = app.run("transport.play", json!({}));
                 }
                 let (r, resp) = ui.allocate_exact_size(vec2(38.0, 28.0), Sense::click());
-                key(ui.painter(), r, &resp, if recording { Color32::from_rgb(110, 30, 30) } else { key_fill(&resp) });
+                key(ui.painter(), r, &resp, if recording { Color32::from_rgb(110, 30, 30) } else if app.engine.transport.record_ready { t.slot_bg } else { key_fill(&resp) });
                 icons::draw(ui.painter(), r.shrink(5.0), "record", t.rec);
-                let resp = resp.on_hover_text("Record (Cmd+Space)");
+                let resp = resp.on_hover_text("Arrangement Record (F9 / Cmd+Space) · click again to finish recording and keep playing · Shift-click arms Record until Play");
                 if let Some(why) = app.record_hint() {
                     // Below the whole group, so the hint covers none of its buttons.
                     let below = Rect::from_min_max(r.min, pos2(r.max.x, g.max.y));
                     egui::Tooltip::always_open(ui.ctx().clone(), resp.layer_id, resp.id, below).show(|ui| ui.label(why));
                 }
                 if resp.clicked() {
-                    let _ = app.run("transport.record", json!({}));
+                    let _ = app.run("transport.record", json!({"start_playback": !ui.input(|input| input.modifiers.shift)}));
                 }
             });
             ui.horizontal(|ui| {
@@ -433,4 +434,30 @@ fn output_meter(app: &mut SoundApp, ui: &mut Ui) {
         let rr = Rect::from_min_size(pos2(r.min.x + 2.0 + c as f32 * (w + 2.0), r.min.y), vec2(w, r.height()));
         crate::widgets::meter(ui, rr, m.level[c], m.hold[c], m.clip);
     }
+}
+
+fn loop_range(app: &mut SoundApp, ui: &mut Ui) {
+    let edit = &app.engine.session().edit;
+    let range = edit.arrangement_loop.unwrap_or(edit.selection);
+    let enabled = edit.loop_playback;
+    let rate = app.engine.session().sample_rate;
+    let mut start = rate.seconds(range.start);
+    let mut length = rate.seconds(range.len().max(1));
+    group(ui, 194.0, 64.0, |ui, _| {
+        ui.vertical(|ui| {
+            ui.small("ARRANGEMENT LOOP");
+            ui.horizontal(|ui| {
+                ui.small("Start");
+                if ui.add(egui::DragValue::new(&mut start).speed(0.01).range(0.0..=86_400.0).suffix(" s")).changed() {
+                    let _ = app.run("transport.loop", json!({"start": rate.samples(start), "length": range.len().max(1), "enabled": enabled}));
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.small("Length");
+                if ui.add(egui::DragValue::new(&mut length).speed(0.01).range((1.0 / rate.as_f64())..=86_400.0).suffix(" s")).changed() {
+                    let _ = app.run("transport.loop", json!({"start": range.start, "length": rate.samples(length).max(1), "enabled": enabled}));
+                }
+            });
+        });
+    });
 }

@@ -1418,6 +1418,8 @@ pub fn plan_takes(e: &Engine, unsaved_dir: &Path, _input_channels: usize) -> Vec
 pub struct Recording {
     pub start: Samples,
     pub pass: Option<Samples>,
+    #[serde(default)]
+    pub cycle: Option<Range>,
     pub punch: Option<Range>,
     /// The input's sample rate, which the take files are written at.
     pub rate: u32,
@@ -1434,7 +1436,7 @@ pub struct Take {
 
 /// Place recorded take files as `plan` says, as one undo step ("Record").
 pub fn place_recording(e: &mut Engine, plan: &Recording, takes: Vec<(TrackId, PathBuf)>) -> Vec<soundcraft_model::ClipId> {
-    let ids = add_recording(e, plan.start, takes, plan.pass);
+    let ids = add_recording_cycle(e, plan.start, takes, plan.pass, plan.cycle);
     if let Some(p) = plan.punch {
         let clips: Vec<u64> = ids.iter().map(|c| c.0).collect();
         let _ = e.execute_merged("edit.trim_to_fill_selection", &json!({"clips": clips, "start": p.start, "end": p.end}), "record");
@@ -1446,6 +1448,25 @@ pub fn place_recording(e: &mut Engine, plan: &Recording, takes: Vec<(TrackId, Pa
 /// source of its clips. With `pass` (loop recording), a take becomes one clip per pass (at most
 /// 1000), each pass after the first on a new playlist.
 pub fn add_recording(e: &mut Engine, start: Samples, takes: Vec<(TrackId, PathBuf)>, pass: Option<Samples>) -> Vec<soundcraft_model::ClipId> {
+    add_recording_cycle(e, start, takes, pass, None)
+}
+
+fn record_segments(start: Samples, pass: Option<Samples>, cycle: Option<Range>, len: Samples) -> Vec<(Samples, Samples, Samples)> {
+    let cycle = cycle.filter(|range| range.start >= 0 && range.len() > 0);
+    let mut at = cycle.map_or(start, |range| if start >= range.end { range.start.saturating_add(start.saturating_sub(range.start).rem_euclid(range.len())) } else { start });
+    let mut offset = 0;
+    let mut segments = Vec::new();
+    while offset < len && segments.len() < 1_000 {
+        let maximum = cycle.map_or(pass.unwrap_or(len).max(1), |range| range.end.saturating_sub(at).max(1));
+        let n = if segments.len() == 999 { len - offset } else { maximum.min(len - offset) };
+        segments.push((offset, at, n));
+        offset += n;
+        at = cycle.map_or(start, |range| range.start);
+    }
+    segments
+}
+
+fn add_recording_cycle(e: &mut Engine, start: Samples, takes: Vec<(TrackId, PathBuf)>, pass: Option<Samples>, cycle: Option<Range>) -> Vec<soundcraft_model::ClipId> {
     let before = e.session_arc();
     let mut out = Vec::new();
     for (tid, path) in takes {
@@ -1462,12 +1483,10 @@ pub fn add_recording(e: &mut Engine, start: Samples, takes: Vec<(TrackId, PathBu
         let Some(x) = s.sources.last_mut() else { continue };
         x.unsaved = resampled;
         let len = i64::try_from(x.frames).unwrap_or(0);
-        let pass = pass.unwrap_or(len).max(1);
-        for offset in (0..len).step_by(usize::try_from(pass).unwrap_or(usize::MAX)).take(1_000) {
-            let n = pass.min(len - offset);
-            if offset > 0 && n < pass / 8 {
-                break;
-            }
+        let segments = record_segments(start, pass, cycle, len);
+        if segments.len() > 1 && let Some(track) = s.track_mut(tid) { track.view = "playlists".into(); }
+        let consolidated = segments.len() == 1_000 && segments.last().is_some_and(|segment| segment.2 > cycle.map_or(pass.unwrap_or(len).max(1), |range| range.len().max(1)));
+        for (offset, at, n) in segments {
             if offset > 0
                 && let Some(t) = s.track_mut(tid)
             {
@@ -1475,11 +1494,12 @@ pub fn add_recording(e: &mut Engine, start: Samples, takes: Vec<(TrackId, PathBu
                 t.active_playlist = t.playlists.len() - 1;
             }
             let cid = s.new_clip_id();
-            let trim = start.saturating_neg().max(0).min(n);
+            let trim = at.saturating_neg().max(0).min(n);
             if trim >= n { continue; }
-            crate::edit::place_clip(s, tid, Clip::audio(cid, name, src, offset.saturating_add(trim), start.max(0), n - trim));
+            crate::edit::place_clip(s, tid, Clip::audio(cid, name, src, offset.saturating_add(trim), at.max(0), n - trim));
             out.push(cid);
         }
+        if consolidated { e.message("Loop recording reached 1,000 take lanes; the remaining audio is retained in the last take as one continuous clip"); }
     }
     if !out.is_empty() {
         e.push_undo("Record", before);
@@ -1496,10 +1516,38 @@ pub fn live_span(start: Samples, pass: Option<Samples>, punch: Option<Range>, le
     Some((origin, span.intersect(&punch.unwrap_or(span))?))
 }
 
+pub fn live_cycle_span(start: Samples, cycle: Range, len: Samples) -> Option<(Samples, Range)> {
+    if cycle.len() <= 0 || len <= 0 { return None; }
+    let at = if start >= cycle.end { cycle.start.saturating_add(start.saturating_sub(cycle.start).rem_euclid(cycle.len())) } else { start };
+    let first = cycle.end.saturating_sub(at).max(1);
+    let (offset, at) = if len <= first { (0, at) } else {
+        (first.saturating_add((len - first - 1) / cycle.len() * cycle.len()), cycle.start)
+    };
+    let origin = at.saturating_sub(offset);
+    Some((origin, Range::new(at, at.saturating_add(len - offset))))
+}
+
 #[cfg(test)]
 mod record_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn loop_recording_retains_partial_first_and_short_last_passes() {
+        let cycle = Range::new(100, 200);
+        assert_eq!(record_segments(150, Some(100), Some(cycle), 176), vec![(0, 150, 50), (50, 100, 100), (150, 100, 26)]);
+        assert_eq!(record_segments(100, Some(100), None, 205), vec![(0, 100, 100), (100, 100, 100), (200, 100, 5)]);
+        assert_eq!(live_cycle_span(150, cycle, 75), Some((50, Range::new(100, 125))));
+        assert_eq!(live_cycle_span(150, cycle, 50), Some((150, Range::new(150, 200))));
+    }
+
+    #[test]
+    fn loop_segment_limit_retains_all_remaining_source_samples() {
+        let segments = record_segments(0, Some(1), Some(Range::new(0, 1)), 1_005);
+        assert_eq!(segments.len(), 1_000);
+        assert_eq!(segments.iter().map(|segment| segment.2).sum::<i64>(), 1_005);
+        assert_eq!(segments.last(), Some(&(999, 0, 6)));
+    }
 
     fn armed(e: &mut Engine, name: &str, format: &str, input: &str) -> TrackId {
         let id = e.execute("track.new", &json!({"name": name, "format": format})).unwrap()["tracks"][0].as_u64().unwrap();

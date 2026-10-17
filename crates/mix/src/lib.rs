@@ -1377,7 +1377,7 @@ fn process_strip(
     let transport = transport_at(s, pos, !live.monitor_only, live.recording);
     if strip.pad_effects.enabled { strip.pad_effects.prepare(t); }
     match t.kind {
-        TrackKind::Audio if !live.input.is_empty() && t.mixer.input_monitor => {
+        TrackKind::Audio if !live.input.is_empty() && t.mixer.monitors_input(live.recording, !live.monitor_only, t.clips().iter().any(|clip| !clip.muted && clip.is_audio() && clip.range().overlaps(&Range::new(pos, pos.saturating_add(frames as i64))))) => {
             // Input monitoring: the track hears its hardware input instead of its clips.
             if let Some(first) = t.mixer.input.hardware_input_start()
                 && first.checked_add(t.channels()).is_some_and(|end| end <= live.input.len())

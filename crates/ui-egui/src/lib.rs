@@ -498,7 +498,7 @@ impl SoundApp {
         if let Some(r) = menus::run_ui_command(self, id, &params) {
             return r;
         }
-        if id.starts_with("session.save") || id.starts_with("file.bounce") || matches!(id, "mix.insert_move" | "mix.insert_before" | "file.export_project" | "file.export_exchange") {
+        if id.starts_with("session.save") || id.starts_with("file.bounce") || matches!(id, "mix.insert_move" | "mix.insert_before" | "mix.device_replace" | "file.export_project" | "file.export_exchange") {
             // Third-party plugins keep state the session can't see: store it first.
             self.capture_plugin_states();
         }
@@ -512,7 +512,7 @@ impl SoundApp {
         let replacing = matches!(id, "session.new" | "session.open" | "session.close" | "session.revert");
         match self.engine.execute(id, &params) {
             Ok(v) => {
-                if matches!(id, "mix.insert_move" | "mix.insert_before") {
+                if matches!(id, "mix.insert_move" | "mix.insert_before" | "mix.device_replace") {
                     let reset: Vec<_> = v.get("reset").and_then(Value::as_array).into_iter().flatten().filter_map(|entry| {
                         let track = TrackId(entry["track"].as_u64()?);
                         let slot = if entry["instrument"].as_bool() == Some(true) { soundcraft_mix::INSTRUMENT_SLOT } else { usize::try_from(entry["slot"].as_u64()?).ok()? };
@@ -521,6 +521,9 @@ impl SoundApp {
                     if let Some(player) = &self.player { player.invalidate_plugin_slots(&reset); }
                     self.ui.plugin_windows.retain(|window| !reset.contains(window));
                     self.browser.folded_devices.clear();
+                    self.browser.expanded_controls.clear();
+                    self.browser.configuring.clear();
+                    self.parameter_automation = parameter_automation::ParameterAutomation::default();
                     self.show_insert_result(&v);
                 }
                 if replacing { crate::sample_browser::stop(self); self.parameter_automation = parameter_automation::ParameterAutomation::default(); }
@@ -611,6 +614,7 @@ impl SoundApp {
         self.sim = None;
         self.engine.transport.playing = false;
         self.engine.transport.recording = false;
+        self.engine.transport.record_ready = false;
         let stop_at = self.engine.transport.position;
         // Snapshot the session flags first: `session_mut` below needs a
         // mutable borrow, so no session borrow may span it.
@@ -666,38 +670,22 @@ impl SoundApp {
         }
         let already_playing = self.is_playing();
         self.engine.transport.recording = true;
-        if already_playing {
-            // Punch in on the fly at the current playhead.
-            self.record_start = self.position();
-            self.punch = None;
-            self.plan_recording(takes, None);
-            return;
+        let edit = self.engine.session().edit.clone();
+        let cycle = (edit.loop_playback || edit.loop_record).then_some(edit.arrangement_loop.unwrap_or(edit.selection)).filter(|range| range.len() > 0);
+        self.record_start = self.position();
+        self.punch = None;
+        self.engine.transport.record_ready = false;
+        if !already_playing { self.start_play(self.record_start, None, cycle); }
+        else {
+            if let Some(player) = &self.player { player.set_loop(cycle); }
+            if let Some(sim) = &mut self.sim { sim.2 = cycle; }
         }
-        let e = self.engine.session().edit.clone();
-        let sel = e.selection;
-        if e.loop_record && !sel.is_empty() {
-            self.record_start = sel.start;
-            self.punch = None;
-            self.start_play(sel.start, None, Some(sel));
-            self.plan_recording(takes, Some(sel.len()));
-        } else {
-            // Record into the selection when there is one (punch), with pre/post-roll if enabled;
-            // the take is trimmed back to the punch range afterwards.
-            let (pre, post) = if e.pre_post_roll { (e.pre_roll, e.post_roll) } else { (0, 0) };
-            let from = (sel.start - pre).max(0);
-            self.record_start = from;
-            self.punch = (!sel.is_empty()).then_some(sel);
-            let end = (!sel.is_empty()).then_some(sel.end + post);
-            self.start_play(from, end, None);
-            self.plan_recording(takes, None);
-        }
+        self.plan_recording(takes, cycle);
     }
 
-    /// Remember where the armed `takes` go (split into passes of `pass` when loop recording) and
-    /// autosave that plan with the session.
-    fn plan_recording(&mut self, takes: Vec<soundcraft_engine::io::Take>, pass: Option<Samples>) {
+    fn plan_recording(&mut self, takes: Vec<soundcraft_engine::io::Take>, cycle: Option<Range>) {
         let rate = self.recorder.as_ref().map_or(0, |r| r.sample_rate);
-        self.take_plan = Some(soundcraft_engine::io::Recording { start: self.record_start, pass, punch: self.punch, rate, takes });
+        self.take_plan = Some(soundcraft_engine::io::Recording { start: self.record_start, pass: cycle.map(|range| range.len()), cycle, punch: self.punch, rate, takes });
         if let Some(root) = self.autosave_dir.clone() {
             self.queue_autosave(root);
         }
@@ -745,8 +733,19 @@ impl SoundApp {
 
     /// Parameter edits made in plugin editors go into the session (one undo step per gesture).
     fn apply_editor_edits(&mut self) {
-        let Some(p) = &self.player else { return };
-        for (t, slot, param, value) in p.idle() {
+        let edits = self.player.as_ref().map_or_else(Vec::new, Player::idle);
+        for (t, slot, param, value) in edits {
+            if self.browser.configuring.contains(&(t, slot)) {
+                let visual = if slot == soundcraft_mix::INSTRUMENT_SLOT { self.engine.session().track(t).and_then(|track| track.instrument_insert_slot()) } else { Some(slot) };
+                let insert = self.engine.session().track(t).and_then(|track| if slot == soundcraft_mix::INSTRUMENT_SLOT { track.instrument.as_ref() } else { track.mixer.inserts.get(slot).and_then(Option::as_ref) });
+                if let (Some(visual), Some(insert)) = (visual, insert) {
+                    if insert.controls.parameters.len() < 64 && !insert.controls.parameters.contains(&param) {
+                        let mut parameters = insert.controls.parameters.clone();
+                        parameters.push(param.clone());
+                        let _ = self.engine.execute_merged("mix.device_controls", &json!({"track": t.0, "slot": visual, "parameters": parameters}), &format!("configure:{}:{slot}", t.0));
+                    }
+                }
+            }
             if slot == soundcraft_mix::INSTRUMENT_SLOT {
                 let _ = self.engine.execute_merged("mix.instrument_param",
                     &json!({"track":t.0,"param":param,"value":value}),
@@ -1090,6 +1089,7 @@ impl SoundApp {
         let mut plan = plan.unwrap_or_else(|| soundcraft_engine::io::Recording {
             start: self.record_start,
             pass: None,
+            cycle: None,
             punch: self.punch,
             rate: 0,
             takes: Vec::new(),
@@ -1189,24 +1189,19 @@ impl SoundApp {
         }
     }
 
-    /// Play from the selection, honouring loop playback and selection end.
     pub fn play_from_selection(&mut self) {
-        let s = self.engine.session();
-        let sel = s.edit.selection;
-        let preroll = if s.edit.pre_post_roll { s.edit.pre_roll } else { 0 };
-        let postroll = if s.edit.pre_post_roll { s.edit.post_roll } else { 0 };
-        if s.edit.loop_playback && !sel.is_empty() {
-            self.start_play(sel.start, None, Some(sel));
-        } else if !sel.is_empty() {
-            self.start_play((sel.start - preroll).max(0), Some(sel.end + postroll), None);
-        } else {
-            self.start_play((sel.start - preroll).max(0), None, None);
-        }
+        let edit = &self.engine.session().edit;
+        let range = edit.loop_playback.then_some(edit.arrangement_loop.unwrap_or(edit.selection)).filter(|range| range.len() > 0);
+        self.start_play(edit.selection.start, None, range);
     }
 
     fn handle_transport(&mut self, dt: f32) {
         let reqs: Vec<TransportRequest> = std::mem::take(&mut self.engine.transport_requests);
         for r in reqs {
+            if self.engine.transport.recording && matches!(&r, TransportRequest::Locate(_) | TransportRequest::PlaySelection | TransportRequest::HalfSpeed) {
+                self.ui.status = "Finish this recording before moving the playback position or speed".into();
+                continue;
+            }
             match r {
                 TransportRequest::ResetSession => {
                     if let Some(p) = &self.player {
@@ -1230,10 +1225,16 @@ impl SoundApp {
                     self.meters.clear();
                     self.main_meter = MeterDisplay::default();
                     self.browser.auto_kits.clear();
+                    self.browser.configuring.clear();
+                    self.browser.expanded_controls.clear();
+                    self.browser.folded_devices.clear();
+                    self.browser.selected_device = None;
+                    self.browser.replace_device = None;
+                    self.take_plan = None;
                 }
                 TransportRequest::Play => {
                     if !self.is_playing() {
-                        self.play_from_selection();
+                        if self.engine.transport.record_ready { self.start_recording(); } else { self.play_from_selection(); }
                     }
                 }
                 TransportRequest::Stop | TransportRequest::Pause => self.stop_play(),
@@ -1241,12 +1242,19 @@ impl SoundApp {
                     if self.is_playing() {
                         self.stop_play();
                     } else {
-                        self.play_from_selection();
+                        if self.engine.transport.record_ready { self.start_recording(); } else { self.play_from_selection(); }
                     }
                 }
-                TransportRequest::Record => {
+                TransportRequest::RecordArm if !self.is_playing() => {
+                    self.engine.transport.record_ready = !self.engine.transport.record_ready;
+                }
+                TransportRequest::Loop(range) => {
+                    if let Some(player) = &self.player { player.set_loop(range); }
+                    if let Some(sim) = &mut self.sim { sim.2 = range; }
+                }
+                TransportRequest::Record | TransportRequest::RecordArm => {
                     if self.engine.transport.recording {
-                        self.stop_play();
+                        self.finish_recording();
                     } else {
                         self.start_recording();
                     }
@@ -1601,6 +1609,36 @@ mod tests {
     use super::{Services, SoundApp, automation_step_due, input_meter_peak};
     use serde_json::json;
     use soundcraft_model::{TrackId, TrackKind};
+
+    #[test]
+    fn arrangement_play_continues_past_the_selection_and_record_off_keeps_playing() {
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        app.engine.execute("edit.select", &json!({"start": 1_000, "end": 2_000})).unwrap();
+        app.engine.execute("transport.play", &json!({})).unwrap();
+        app.handle_transport(0.1);
+        assert!(app.is_playing());
+        assert!(app.engine.transport.position > 2_000);
+        app.engine.transport.recording = true;
+        app.engine.execute("transport.record", &json!({})).unwrap();
+        app.handle_transport(0.01);
+        assert!(app.is_playing());
+        assert!(!app.engine.transport.recording);
+    }
+
+    #[test]
+    fn arrangement_loop_changes_during_playback_without_restarting_at_selection() {
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        app.engine.execute("transport.loop", &json!({"start": 0, "end": 48_000})).unwrap();
+        app.engine.execute("transport.play", &json!({})).unwrap();
+        app.handle_transport(0.1);
+        let before = app.position();
+        app.engine.execute("edit.select", &json!({"start": 20_000, "end": 24_000})).unwrap();
+        app.engine.execute("transport.loop", &json!({"enabled": false})).unwrap();
+        app.handle_transport(0.01);
+        assert!(app.position() >= before);
+        assert!(app.position() < 20_000);
+        assert_eq!(app.engine.session().edit.arrangement_loop, Some(soundcraft_time::Range::new(0, 48_000)));
+    }
 
     #[test]
     fn unarmed_physical_inputs_meter_without_enabling_monitoring() {
