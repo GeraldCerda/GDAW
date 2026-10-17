@@ -16,6 +16,9 @@ pub fn strip_width(narrow: bool) -> f32 {
 }
 
 pub fn show(app: &mut SoundApp, ui: &mut Ui) {
+    if app.ui.show_devices {
+        egui::Panel::bottom("mix_track_devices").default_size(230.0).resizable(true).frame(egui::Frame::NONE.fill(Tokens::current().panel_bg)).show(ui, |ui| ui.push_id("mix_device_chain", |ui| crate::devices::chain(app, ui)));
+    }
     crate::docking::show(app, ui, crate::MainWindow::Mix);
 }
 
@@ -571,6 +574,8 @@ pub(crate) fn insert_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: 
     if resp.clicked() {
         let _ = app.run("edit.select", json!({"tracks": [id.0]}));
         app.ui.show_devices = true;
+        app.browser.selected_device = Some((id, address));
+        app.browser.folded_devices.remove(&(id, address));
     }
     if resp.clicked() && ins.is_some() {
         if ui.input(|i| i.modifiers.command) {

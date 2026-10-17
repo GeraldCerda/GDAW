@@ -21,9 +21,74 @@ mod native_menu;
 
 use soundcraft_engine::Engine;
 use soundcraft_ui_egui::{Services, SoundApp, UiState, dialogs};
-use std::sync::Arc;
 
-struct App(SoundApp, Option<&'static logging::AppLogger>, #[cfg(target_os = "macos")] Option<native_menu::NativeMenu>);
+struct App {
+    sound: SoundApp,
+    logger: Option<&'static logging::AppLogger>,
+    #[cfg(target_os = "macos")]
+    menu: Option<native_menu::NativeMenu>,
+    startup: Option<Startup>,
+}
+
+#[derive(Clone, Copy)]
+enum LaunchPhase { Plugins, WaitingForPlugins, Audio, Files, Workspace, Ready }
+
+struct Startup {
+    phase: LaunchPhase,
+    no_audio: bool,
+    files: std::collections::VecDeque<String>,
+}
+
+impl App {
+    fn advance_startup(&mut self, ctx: &egui::Context) {
+        if !self.sound.browser.splash.painted { return; }
+        let Some(mut startup) = self.startup.take() else { return };
+        match startup.phase {
+            LaunchPhase::Plugins => {
+                soundcraft_ui_egui::devices::begin_startup_scan(&mut self.sound);
+                startup.phase = LaunchPhase::WaitingForPlugins;
+            }
+            LaunchPhase::WaitingForPlugins => {
+                if !self.sound.browser.startup_scan {
+                    self.sound.browser.splash.phase("Preparing audio engine", if startup.no_audio { "Audio devices disabled by launch option" } else { "Opening the selected output device" });
+                    startup.phase = LaunchPhase::Audio;
+                }
+            }
+            LaunchPhase::Audio => {
+                if !startup.no_audio {
+                    self.sound.player = Some(soundcraft_playback::Player::with_config(self.sound.engine.session_arc(), &self.sound.ui.audio));
+                }
+                self.sound.browser.splash.phase("Loading session", startup.files.front().cloned().unwrap_or_else(|| self.sound.engine.session().name.clone()));
+                startup.phase = LaunchPhase::Files;
+            }
+            LaunchPhase::Files => {
+                if let Some(path) = startup.files.pop_front() { open_path(&mut self.sound, &path); }
+                if let Some(next) = startup.files.front() { self.sound.browser.splash.phase("Loading session", next.clone()); }
+                else {
+                    self.sound.browser.splash.phase("Preparing workspace", "Restoring track devices and mixer routing");
+                    startup.phase = LaunchPhase::Workspace;
+                }
+            }
+            LaunchPhase::Workspace => {
+                #[cfg(target_os = "macos")]
+                match native_menu::NativeMenu::new(&self.sound, ctx) {
+                    Ok(menu) => { self.sound.native_menu_bar = true; self.menu = Some(menu); }
+                    Err(error) => log::warn!("system menu bar unavailable, using the in-window menu bar: {error}"),
+                }
+                self.sound.browser.splash.phase("Ready", self.sound.ui.status.clone());
+                startup.phase = LaunchPhase::Ready;
+            }
+            LaunchPhase::Ready => {
+                self.sound.browser.startup_hold = false;
+                ctx.request_repaint();
+                return;
+            }
+        }
+        self.startup = Some(startup);
+        ctx.request_repaint();
+    }
+}
+
 
 /// Sends the title only when it changes, remembered here as X11 and Wayland can't read it back.
 fn set_title(ctx: &egui::Context, title: String) {
@@ -37,71 +102,73 @@ fn set_title(ctx: &egui::Context, title: String) {
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // What the realtime audio thread logged is written here, off that thread.
-        if let Some(logger) = self.1 {
+        if let Some(logger) = self.logger {
             logger.report_audio_thread();
         }
         #[cfg(target_os = "macos")]
-        if let Some(menu) = &mut self.2 {
-            menu.process(&mut self.0);
+        if let Some(menu) = &mut self.menu {
+            menu.process(&mut self.sound);
         }
-        self.0.guarded(|app| app.logic(ctx));
+        self.sound.guarded(|app| app.logic(ctx));
+        if ctx.current_pass_index() == 0 { self.advance_startup(ctx); }
         #[cfg(target_os = "macos")]
-        if let Some(menu) = &mut self.2 {
-            menu.sync(&self.0);
+        if let Some(menu) = &mut self.menu {
+            menu.sync(&self.sound);
         }
         // Files dropped on the window: audio on an instrument track or a Sampler window loads
         // the sampler; otherwise sessions open and audio/MIDI import.
         let dropped: Vec<String> =
-            self.0.take_dropped_files(ctx).iter().map(|f| f.path().to_string_lossy().into_owned()).filter(|s| !s.is_empty()).collect();
+            self.sound.take_dropped_files(ctx).iter().map(|f| f.path().to_string_lossy().into_owned()).filter(|s| !s.is_empty()).collect();
         for p in dropped {
-            open_path(&mut self.0, &p);
+            if let Some(startup) = &mut self.startup { startup.files.push_back(p); }
+            else { open_path(&mut self.sound, &p); }
         }
-        if self.0.quit_requested {
+        if self.sound.quit_requested {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-        } else if ctx.input(|i| i.viewport().close_requested()) && dialogs::ask_to_save(&mut self.0, "app.quit", &serde_json::json!({})) {
+        } else if ctx.input(|i| i.viewport().close_requested()) && dialogs::ask_to_save(&mut self.sound, "app.quit", &serde_json::json!({})) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
         soundcraft_ui_egui::fit_window_to_screen(ctx);
         let (inner, maximized) = ctx.input(|i| (i.viewport().inner_rect, i.viewport().maximized.unwrap_or(false)));
-        self.0.ui.window_maximized = maximized;
+        self.sound.ui.window_maximized = maximized;
         if let Some(r) = inner.filter(|_| !maximized) {
-            self.0.ui.window_size = (r.size() * ctx.zoom_factor()).round().into();
+            self.sound.ui.window_size = (r.size() * ctx.zoom_factor()).round().into();
         }
-        self.0.ui.ui_scale = self.0.extra.ui_scale;
+        self.sound.ui.ui_scale = self.sound.extra.ui_scale;
         // Saved now rather than at exit: the recent list matters most after a crash.
-        if self.0.take_recent_changed() {
-            save_prefs(&self.0.ui);
+        if self.sound.take_recent_changed() {
+            save_prefs(&self.sound.ui);
         }
         // With the system menu bar there is no egui bar showing the window and dirty state, so the
         // title carries them; elsewhere the egui menu bar already does.
-        let title = if self.0.native_menu_bar {
+        let title = if self.sound.native_menu_bar {
             format!(
                 "{}{} — G — {}",
-                self.0.engine.session().name,
-                if self.0.engine.is_dirty() { " *" } else { "" },
-                if self.0.ui.window == soundcraft_ui_egui::MainWindow::Edit { "Edit" } else { "Mix" }
+                self.sound.engine.session().name,
+                if self.sound.engine.is_dirty() { " *" } else { "" },
+                if self.sound.ui.window == soundcraft_ui_egui::MainWindow::Edit { "Edit" } else { "Mix" }
             )
         } else {
-            format!("{} — G", self.0.engine.session().name)
+            format!("{} — G", self.sound.engine.session().name)
         };
         set_title(ctx, title);
     }
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
-        self.0.raw_input_hook(raw);
-        self.0.native_keypad_input(ctx, raw);
+        self.sound.raw_input_hook(raw);
+        if self.startup.is_none() && !self.sound.browser.startup_scan { self.sound.native_keypad_input(ctx, raw); }
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.0.guarded(|app| app.ui(ui));
+        self.sound.guarded(|app| app.ui(ui));
     }
     fn on_exit(&mut self) {
-        self.0.close_autosave();
-        save_prefs(&self.0.ui);
-        if let Some(logger) = self.1 {
+        self.sound.close_autosave();
+        save_prefs(&self.sound.ui);
+        if let Some(logger) = self.logger {
             logger.report_audio_thread();
         }
         // The system Quit (⌘Q) ends the process from inside the event loop, so `run_native` never
         // returns: release the player's plugin instances and shut plugin hosting down here.
-        self.0.player = None;
+        self.sound.player = None;
         soundcraft_engine::shutdown_plugin_hosts();
     }
 }
@@ -278,40 +345,25 @@ fn main() -> eframe::Result {
         "G",
         options,
         Box::new(move |cc| {
-            let player =
-                if no_audio { None } else { Some(soundcraft_playback::Player::with_config(Arc::new(engine.session().clone()), &prefs.audio)) };
-            let mut app = SoundApp::new(engine, player, services());
+            let mut app = SoundApp::new(engine, None, services());
+            app.browser.startup_hold = true;
             app.autosave_dir = prefs_path().and_then(|p| p.parent().map(|d| d.join("Autosave")));
             app.leftovers = app.autosave_dir.as_deref().map(soundcraft_engine::autosave::leftovers).unwrap_or_default();
             app.preset_dir = prefs_path().and_then(|p| p.parent().map(|d| d.join("Presets")));
             app.extra.ui_scale = prefs.ui_scale;
             app.ui = prefs;
-            soundcraft_ui_egui::devices::begin_startup_scan(&mut app);
+            app.browser.splash.phase("Starting GDAW", "Preparing the plugin catalog");
             if let Some(port) = control_port {
                 let rx = control_server::start(port, cc.egui_ctx.clone());
                 app = app.with_control(rx);
             }
-            for f in &files {
-                open_path(&mut app, f);
-            }
-            // If the system menu bar cannot be built, keep the egui menu bar rather than fail to start.
-            #[cfg(target_os = "macos")]
-            let menu = match native_menu::NativeMenu::new(&app, &cc.egui_ctx) {
-                Ok(m) => {
-                    app.native_menu_bar = true;
-                    Some(m)
-                }
-                Err(e) => {
-                    log::warn!("system menu bar unavailable, using the in-window menu bar: {e}");
-                    None
-                }
-            };
-            Ok(Box::new(App(
-                app,
+            Ok(Box::new(App {
+                sound: app,
                 logger,
                 #[cfg(target_os = "macos")]
-                menu,
-            )))
+                menu: None,
+                startup: Some(Startup { phase: LaunchPhase::Plugins, no_audio, files: files.into() }),
+            }))
         }),
     )
 }

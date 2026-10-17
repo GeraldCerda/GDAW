@@ -112,7 +112,7 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
         egui::Panel::left("device_browser").default_size(260.0).resizable(true).frame(egui::Frame::NONE.fill(t.panel_bg)).show(ui, |ui| crate::devices::browser(app, ui));
     }
     if app.ui.show_devices {
-        egui::Panel::bottom("track_devices").default_size(250.0).resizable(true).frame(egui::Frame::NONE.fill(t.panel_bg2)).show(ui, |ui| crate::devices::chain(app, ui));
+        egui::Panel::bottom("track_devices").default_size(230.0).resizable(true).frame(egui::Frame::NONE.fill(t.panel_bg2)).show(ui, |ui| crate::devices::chain(app, ui));
     }
     if app.ui.show_universe {
         egui::Panel::top("universe").exact_size(64.0).frame(egui::Frame::NONE.fill(Tokens::current().universe_bg)).show(ui, |ui| universe(app, ui));

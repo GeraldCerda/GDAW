@@ -28,6 +28,16 @@ type BundleScanner = fn(&Path) -> Result<Vec<ClapDescriptor>, ClapError>;
 
 static BUNDLE_SCANNER: OnceLock<BundleScanner> = OnceLock::new();
 
+type ScanProgress = fn(usize, usize, Option<&str>);
+static SCAN_PROGRESS: OnceLock<ScanProgress> = OnceLock::new();
+
+pub fn set_scan_progress(observer: ScanProgress) { let _ = SCAN_PROGRESS.set(observer); }
+
+fn report_scan(total: usize, completed: usize, current: Option<&str>) {
+    if let Some(observer) = SCAN_PROGRESS.get() { observer(total, completed, current); }
+}
+
+
 pub fn set_bundle_scanner(scanner: BundleScanner) {
     let _ = BUNDLE_SCANNER.set(scanner);
 }
@@ -61,7 +71,12 @@ pub fn load_bundle(path: &Path) -> Result<Vec<ClapDescriptor>, ClapError> {
 /// given id wins.
 pub fn scan_paths(dirs: &[PathBuf]) -> Vec<ClapDescriptor> {
     let mut out: Vec<ClapDescriptor> = Vec::new();
-    for path in paths::find_bundles(dirs) {
+    report_scan(0, 0, None);
+    let paths = paths::find_bundles(dirs);
+    let total = paths.len();
+    report_scan(total, 0, Some(""));
+    for (index, path) in paths.into_iter().enumerate() {
+        report_scan(total, index, Some(&path.to_string_lossy()));
         let scanner = BUNDLE_SCANNER.get().copied().unwrap_or(load_bundle);
         match scanner(&path) {
             Ok(ds) => {
@@ -73,6 +88,7 @@ pub fn scan_paths(dirs: &[PathBuf]) -> Vec<ClapDescriptor> {
             }
             Err(e) => log::warn!("{e}"),
         }
+        report_scan(total, index + 1, Some(""));
     }
     out.sort_by_key(|d| d.name.to_lowercase());
     out

@@ -95,6 +95,7 @@ pub fn specs() -> Vec<CommandSpec> {
             automation_mode
         ),
         cmd!("mix.insert", "Insert Plugin", [], None, "{track?, slot?: 0..9 | a..j, plugin: id, params?: {id: value}}", has_selection, insert),
+        cmd!("mix.insert_before", "Insert Device Before", [], None, "{track?, before: 0..10, plugin: id, params?: {id: value}}", has_selection, insert_before),
         cmd!("mix.insert_remove", "Remove Insert", [], None, "{track?, slot}", has_selection, insert_remove),
         cmd!("mix.insert_bypass", "Bypass Insert", [], None, "{track?, slot, value?: bool}", has_selection, insert_bypass),
         cmd!("mix.insert_param", "Set Plugin Parameter", [], None, "{track?, slot, param, value}", has_selection, insert_param),
@@ -108,7 +109,7 @@ pub fn specs() -> Vec<CommandSpec> {
             has_selection,
             insert_params
         ),
-        cmd!("mix.insert_move", "Move Insert", [], None, "{track?: destination, from_track?: source, from, to, copy?: false, expected_plugin?: id} — reorder within a track; swap between tracks; copy into an empty slot", has_selection, insert_move),
+        cmd!("mix.insert_move", "Move Insert", [], None, "{track?: destination, from_track?: source, from, to, copy?: false, placement?: before, expected_plugin?: id} — reorder within a track; swap between tracks; copy into an empty slot", has_selection, insert_move),
         cmd!(
             "mix.send",
             "Assign Send",
@@ -358,6 +359,22 @@ fn insert(e: &mut Engine, p: &Value) -> Result<Value> {
         *sl = Some(ins);
     }
     Ok(json!({"track": t, "slot": slot, "plugin": info.id}))
+}
+
+fn insert_before(e: &mut Engine, p: &Value) -> Result<Value> {
+    let before = p.get("before").and_then(Value::as_u64).and_then(|value| usize::try_from(value).ok()).filter(|value| *value <= INSERT_SLOTS).ok_or_else(|| bad("mix.insert_before", "before must be 0..10"))?;
+    let track = tracks_required(e, "mix.insert_before", p)?.first().copied().ok_or_else(|| bad("mix.insert_before", "Choose a track"))?;
+    let mut params = p.clone();
+    if let Some(object) = params.as_object_mut() { object.remove("before"); object.remove("slot"); }
+    let result = insert(e, &params)?;
+    let from = result.get("slot").and_then(Value::as_u64).and_then(|value| usize::try_from(value).ok())
+        .or_else(|| e.session().track(track).and_then(|track| track.instrument_insert_slot())).ok_or_else(|| bad("mix.insert_before", "The inserted device has no slot"))?;
+    let to = before.saturating_sub(usize::from(from < before));
+    if from == to {
+        let instrument = e.session().track(track).is_some_and(|track| track.instrument_insert_slot() == Some(to));
+        return Ok(json!({"track": track.0, "slot": to, "reset": [{"track": track.0, "slot": to, "instrument": instrument}]}));
+    }
+    crate::insert_drag::move_insert(e, &json!({"track": track.0, "from": from, "to": to}))
 }
 
 fn insert_remove(e: &mut Engine, p: &Value) -> Result<Value> {

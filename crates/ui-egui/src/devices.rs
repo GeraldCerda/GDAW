@@ -41,6 +41,11 @@ pub struct PluginScanUpdate {
     plugins: Vec<BrowserPlugin>,
 }
 
+pub struct StartupCatalog {
+    unavailable: std::collections::BTreeMap<String, String>,
+    catalog: Option<(Vec<BrowserPlugin>, bool)>,
+}
+
 pub struct BrowserState {
     pub query: String,
     pub category: String,
@@ -55,6 +60,11 @@ pub struct BrowserState {
     pub plugin_scan: Option<std::sync::mpsc::Receiver<PluginScanUpdate>>,
     pub pending_formats: usize,
     pub startup_scan: bool,
+    pub startup_hold: bool,
+    pub splash: crate::splash::Splash,
+    pub catalog_restore: Option<std::sync::mpsc::Receiver<StartupCatalog>>,
+    pub folded_devices: std::collections::BTreeSet<(TrackId, usize)>,
+    pub selected_device: Option<(TrackId, usize)>,
     pub folder: PathBuf,
     pub library_loaded: String,
     pub library_files: Vec<PathBuf>,
@@ -80,6 +90,11 @@ impl Default for BrowserState {
             plugin_scan: None,
             pending_formats: 0,
             startup_scan: false,
+            startup_hold: false,
+            splash: crate::splash::Splash::default(),
+            catalog_restore: None,
+            folded_devices: std::collections::BTreeSet::new(),
+            selected_device: None,
             folder: PathBuf::new(),
             library_loaded: String::new(),
             library_files: Vec::new(),
@@ -93,6 +108,7 @@ impl Default for BrowserState {
 
 fn scan_plugins(app: &mut SoundApp, rescan: bool) {
     crate::plugin_scan::begin(rescan);
+    if rescan { app.browser.startup_scan = true; }
     app.browser.pending_formats = 0;
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -104,18 +120,20 @@ fn scan_plugins(app: &mut SoundApp, rescan: bool) {
                 let _ = sender.send(PluginScanUpdate { format, plugins });
             }) {
                 Ok(_) => app.browser.pending_formats += 1,
-                Err(error) => app.ui.status = format!("Cannot scan {} plugins: {error}", format.label()),
+                Err(error) => { crate::plugin_scan::finish_format(crate::plugin_scan::format_key(format)); app.ui.status = format!("Cannot scan {} plugins: {error}", format.label()); }
             }
         }
         drop(tx);
         app.browser.plugins_loaded = app.browser.pending_formats > 0;
         app.browser.plugin_scan = (app.browser.pending_formats > 0).then_some(rx);
+        if app.browser.plugin_scan.is_none() { app.browser.startup_scan = false; }
     }
     #[cfg(target_arch = "wasm32")]
     {
         app.browser.catalog = crate::plugin_browser::catalog(rescan);
         refresh_available(app);
         app.browser.plugins_loaded = true;
+        app.browser.startup_scan = false;
     }
 }
 
@@ -124,6 +142,7 @@ fn poll_plugins(app: &mut SoundApp) {
         let result = app.browser.plugin_scan.as_ref().map(|scan| scan.try_recv());
         match result {
             Some(Ok(update)) => {
+                crate::plugin_scan::finish_format(crate::plugin_scan::format_key(update.format));
                 app.browser.catalog.retain(|plugin| plugin.format != update.format);
                 app.browser.catalog.extend(update.plugins);
                 crate::plugin_browser::normalize(&mut app.browser.catalog);
@@ -150,26 +169,50 @@ fn poll_plugins(app: &mut SoundApp) {
 }
 
 pub fn begin_startup_scan(app: &mut SoundApp) {
-    if let Some(path) = crate::plugin_scan::cache_dir().map(|directory| directory.join("unavailable.json")) {
-        if let Ok(metadata) = std::fs::metadata(&path) {
-            if metadata.len() <= 33_554_432 {
-                if let Ok(bytes) = std::fs::read(path) { app.browser.unavailable = serde_json::from_slice(&bytes).unwrap_or_default(); }
+    app.browser.startup_scan = true;
+    app.browser.splash.phase("Restoring plugin cache", "Checking installed plugin files and saved availability");
+    let (sender, receiver) = std::sync::mpsc::channel();
+    match std::thread::Builder::new().name("plugin catalog restore".into()).spawn(move || {
+        let mut unavailable = std::collections::BTreeMap::new();
+        if let Some(path) = crate::plugin_scan::cache_dir().map(|directory| directory.join("unavailable.json")) {
+            if std::fs::metadata(&path).is_ok_and(|metadata| metadata.len() <= 33_554_432) {
+                if let Ok(bytes) = std::fs::read(path) { unavailable = serde_json::from_slice(&bytes).unwrap_or_default(); }
             }
         }
+        let catalog = crate::plugin_scan::restore_catalog();
+        let _ = sender.send(StartupCatalog { unavailable, catalog });
+    }) {
+        Ok(_) => app.browser.catalog_restore = Some(receiver),
+        Err(error) => { app.ui.status = format!("Cannot restore plugin cache: {error}"); scan_plugins(app, false); if app.browser.plugin_scan.is_none() { app.browser.startup_scan = false; } }
     }
-    if let Some((plugins, unchanged)) = crate::plugin_scan::restore_catalog() {
-        app.browser.catalog = plugins;
-        app.browser.plugins_loaded = true;
-        refresh_available(app);
-        if unchanged { app.ui.status = format!("{} plugins ready from cache", app.browser.plugins.len()); return; }
-        app.browser.startup_scan = false;
-        scan_plugins(app, false);
-        app.ui.status = "Plugins ready. Checking changed installations in the background…".into();
-        return;
+}
+
+fn poll_startup_catalog(app: &mut SoundApp) {
+    let result = app.browser.catalog_restore.as_ref().map(|receiver| receiver.try_recv());
+    match result {
+        Some(Ok(restored)) => {
+            app.browser.catalog_restore = None;
+            app.browser.unavailable = restored.unavailable;
+            if let Some((plugins, unchanged)) = restored.catalog {
+                app.browser.catalog = plugins;
+                app.browser.plugins_loaded = true;
+                refresh_available(app);
+                if unchanged {
+                    app.browser.startup_scan = false;
+                    app.ui.status = format!("{} plugins ready from cache", app.browser.plugins.len());
+                    return;
+                }
+            }
+            scan_plugins(app, false);
+            if app.browser.plugin_scan.is_none() { app.browser.startup_scan = false; }
+        }
+        Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+            app.browser.catalog_restore = None;
+            scan_plugins(app, false);
+            if app.browser.plugin_scan.is_none() { app.browser.startup_scan = false; }
+        }
+        _ => {}
     }
-    app.browser.startup_scan = true;
-    scan_plugins(app, false);
-    if app.browser.plugin_scan.is_none() { app.browser.startup_scan = false; }
 }
 
 fn refresh_available(app: &mut SoundApp) {
@@ -205,26 +248,18 @@ pub fn retry_plugin(app: &mut SoundApp, id: &str) {
 }
 
 pub fn startup(app: &mut SoundApp, ui: &mut Ui) -> bool {
-    if !app.browser.startup_scan { return false; }
-    ui.vertical_centered(|ui| {
-        ui.add_space(60.0);
-        ui.heading("G");
-        ui.label("Discovering installed plugins");
-        ui.spinner();
-        let progress = crate::plugin_scan::progress();
-        ui.label(format!("{} bundles checked · {} formats remaining", progress.completed, app.browser.pending_formats));
-        for path in progress.current.values() { ui.label(path); }
-        if ui.button("Continue while scanning").clicked() { app.browser.startup_scan = false; }
-    });
-    ui.ctx().request_repaint_after_secs(0.05);
+    if !app.browser.startup_scan && !app.browser.startup_hold { return false; }
+    let scanning = app.browser.plugin_scan.is_some();
+    app.browser.splash.show(ui, scanning);
     true
 }
 
 pub(crate) fn prepare_plugins(app: &mut SoundApp) {
+    poll_startup_catalog(app);
     poll_plugins(app);
     let failures = app.player.as_ref().map_or_else(Vec::new, soundcraft_playback::Player::take_plugin_load_failures);
     for (plugin, reason) in failures { exclude_plugin(app, &plugin, &reason); app.ui.status = reason; }
-    if !app.browser.plugins_loaded && app.browser.plugin_scan.is_none() && app.player.is_some() {
+    if !app.browser.plugins_loaded && app.browser.plugin_scan.is_none() && app.browser.catalog_restore.is_none() && app.player.is_some() && !app.browser.startup_hold {
         scan_plugins(app, false);
     }
 }
@@ -430,55 +465,113 @@ pub fn browser(app: &mut SoundApp, ui: &mut Ui) {
     ui.weak("Double-click to load, or drag into Track Devices");
 }
 
-fn device(app: &mut SoundApp, ui: &mut Ui, track: TrackId, slot: usize, insert: &Insert) {
+fn device(app: &mut SoundApp, ui: &mut Ui, track: TrackId, slot: usize, insert: &Insert, height: f32) {
     let instrument = slot == soundcraft_mix::INSTRUMENT_SLOT;
-    let name = crate::mix_window::plugin_info(&insert.plugin).map_or(insert.plugin.as_str(), |info| info.name).to_string();
-    let rack_width = if insert.plugin == "drum_rack" { if insert.pad_samples.is_empty() { 720.0 } else { 920.0 } } else { 250.0 };
-    ui.set_min_width(rack_width);
-    ui.set_max_width(rack_width + 20.0);
-    ui.horizontal(|ui| {
-        let visual = if instrument { app.engine.session().track(track).and_then(|track| track.instrument_insert_slot()).unwrap_or(0) } else { slot };
-        let title = ui.add(egui::Label::new(egui::RichText::new(format!("{} · {name}", (b'A' + visual.min(25) as u8) as char)).strong()).sense(Sense::click_and_drag()));
-        title.dnd_set_drag_payload(InsertDrag { track, slot: visual, plugin: insert.plugin.clone() });
-        if let Some(source) = title.dnd_release_payload::<InsertDrag>() { move_drop(app, track, visual, &source, ui.input(|input| input.modifiers.alt)); }
-        {
-            if ui.small_button(if insert.bypass { "Enable" } else { "Bypass" }).clicked() {
-                let _ = app.run("mix.insert_bypass", json!({"track": track.0, "slot": visual}));
-            }
-            if ui.small_button("×").clicked() {
-                let _ = app.run("mix.insert_remove", json!({"track": track.0, "slot": visual}));
-            }
-        }
-    });
-    if soundcraft_mix::is_third_party(&insert.plugin) {
-        if ui.button("Open plugin editor").clicked()
-            && let Some(player) = &app.player
-            && let Err(error) = player.open_editor(track, slot)
-        {
-            app.ui.status = error;
-        }
-    } else if insert.plugin == "drum_rack" {
-        rack(app, ui, track, insert);
-    } else {
-        if instrument && insert.plugin == "sampler" {
-            crate::sampler_window::sample_strip(app, ui, track, insert);
-        }
-        if let Some(info) = crate::mix_window::plugin_info(&insert.plugin) {
-            egui::ScrollArea::vertical().max_height(180.0).id_salt(("device_parameters", track.0, slot)).show(ui, |ui| {
-                for parameter in info.params {
-                    let mut value = insert.params.get(parameter.id).copied().unwrap_or(parameter.default);
-                    let response = ui.add(egui::Slider::new(&mut value, parameter.min..=parameter.max).text(parameter.name));
-                    if response.changed() {
-                        let command = if instrument { "mix.instrument_param" } else { "mix.insert_param" };
-                        let _ = app.engine.execute_merged(command, &json!({"track": track.0, "slot": slot, "param": parameter.id, "value": value}), &format!("device:{}:{slot}:{}", track.0, parameter.id));
-                        if let Some(player) = &app.player {
-                            player.editor_set_param(track, slot, parameter.id, value);
-                        }
-                    }
-                }
+    let visual = if instrument { app.engine.session().track(track).and_then(|track| track.instrument_insert_slot()).unwrap_or(0) } else { slot };
+    let key = (track, slot);
+    let folded = app.browser.folded_devices.contains(&key);
+    let info = crate::mix_window::plugin_info(&insert.plugin);
+    let name = info.map_or(insert.plugin.as_str(), |info| info.name).to_string();
+    let width = if folded { 104.0 } else if insert.plugin == "drum_rack" { if insert.pad_samples.is_empty() { 720.0 } else { 920.0 } } else { 232.0 };
+    let tokens = Tokens::current();
+    let selected = app.browser.selected_device == Some(key);
+    let frame = egui::Frame::NONE.fill(tokens.panel_bg2).stroke(egui::Stroke::new(1.0, if selected { tokens.accent } else { tokens.border_light })).inner_margin(5.0);
+    frame.show(ui, |ui| {
+        ui.set_min_size(vec2(width, height));
+        ui.set_max_width(width);
+        ui.horizontal(|ui| {
+            let (rect, activator) = ui.allocate_exact_size(vec2(15.0, 18.0), Sense::click());
+            ui.painter().circle_filled(rect.center(), 4.5, if insert.bypass { tokens.slot_mark } else { tokens.mode_on });
+            if activator.on_hover_text("Activate / bypass device").clicked() { let _ = app.run("mix.insert_bypass", json!({"track": track.0, "slot": visual})); }
+            let title = ui.add_sized([width - 62.0, 20.0], egui::Label::new(egui::RichText::new(&name).strong()).truncate().sense(Sense::click_and_drag()));
+            title.dnd_set_drag_payload(InsertDrag { track, slot: visual, plugin: insert.plugin.clone() });
+            chain_drop(app, ui, track, visual, &title);
+            if title.clicked() { app.browser.selected_device = Some(key); }
+            if title.double_clicked() { if folded { app.browser.folded_devices.remove(&key); } else { app.browser.folded_devices.insert(key); } }
+            title.context_menu(|ui| {
+                if ui.button(if folded { "Unfold device" } else { "Fold device" }).clicked() { if folded { app.browser.folded_devices.remove(&key); } else { app.browser.folded_devices.insert(key); } ui.close(); }
+                if ui.button("Open device window").clicked() { app.show_insert_result(&json!({"track": track.0, "slot": visual})); ui.close(); }
+                if ui.button("Remove device").clicked() { let _ = app.run("mix.insert_remove", json!({"track": track.0, "slot": visual})); ui.close(); }
             });
+            if ui.small_button(if folded { ">" } else { "<" }).on_hover_text(if folded { "Unfold" } else { "Fold" }).clicked() { if folded { app.browser.folded_devices.remove(&key); } else { app.browser.folded_devices.insert(key); } }
+        });
+        ui.separator();
+        if folded {
+            ui.small(format!("Insert {}", (b'A' + visual.min(25) as u8) as char));
+            ui.add(egui::Label::new(&name).wrap());
+            return;
         }
+        if insert.plugin == "drum_rack" {
+            egui::ScrollArea::vertical().max_height((height - 32.0).max(60.0)).id_salt(("rack_body", track.0, slot)).show(ui, |ui| rack(app, ui, track, insert));
+            return;
+        }
+        ui.horizontal(|ui| {
+            ui.small(if instrument { "INSTRUMENT" } else { "AUDIO EFFECT" });
+            if ui.small_button("↗").on_hover_text("Open the full device window").clicked() { app.show_insert_result(&json!({"track": track.0, "slot": visual})); }
+        });
+        egui::ScrollArea::vertical().max_height((height - 58.0).max(50.0)).id_salt(("device_parameters", track.0, slot)).show(ui, |ui| {
+            if instrument && insert.plugin == "sampler" { crate::sampler_window::sample_strip(app, ui, track, insert); }
+            if let Some(info) = info {
+                for parameters in info.params.chunks(3).take(3) {
+                    ui.horizontal_top(|ui| {
+                        for parameter in parameters {
+                            ui.push_id(parameter.id, |ui| {
+                                ui.vertical(|ui| {
+                                    ui.set_width(68.0);
+                                    ui.add_sized([68.0, 17.0], egui::Label::new(egui::RichText::new(parameter.name).size(10.0)).truncate());
+                                    let original = insert.params.get(parameter.id).copied().unwrap_or(parameter.default);
+                                    let mut travel = parameter.to_normalized(original) * 2.0 - 1.0;
+                                    let response = crate::widgets::pan_knob(ui, 35.0, &mut travel, &format!("{} · {}", parameter.name, parameter.format(original)));
+                                    let value = if response.double_clicked() { parameter.default } else { parameter.from_normalized(travel * 0.5 + 0.5) };
+                                    ui.add_sized([68.0, 16.0], egui::Label::new(egui::RichText::new(parameter.format(value)).size(10.0)).truncate());
+                                    if (response.dragged() || response.double_clicked()) && value != original {
+                                        let command = if instrument { "mix.instrument_param" } else { "mix.insert_param" };
+                                        let _ = app.engine.execute_merged(command, &json!({"track": track.0, "slot": slot, "param": parameter.id, "value": value}), &format!("device:{}:{slot}:{}", track.0, parameter.id));
+                                        if let Some(player) = &app.player { player.editor_set_param(track, slot, parameter.id, value); }
+                                    }
+                                });
+                            });
+                        }
+                    });
+                }
+                if info.params.len() > 9 { ui.small("More controls in the device window"); }
+            } else { ui.weak("Device unavailable · saved state retained"); }
+        });
+    });
+}
+
+fn insert_before_item(app: &mut SoundApp, track: TrackId, before: usize, item: &BrowserItem) {
+    let (plugin, values) = match item {
+        BrowserItem::Sample(_) => { insert_item(app, track, item); return; }
+        BrowserItem::Plugin(plugin) => (plugin, None),
+        BrowserItem::Preset(plugin, path) => {
+            let preset = std::fs::metadata(path).ok().filter(|metadata| metadata.len() <= 1_048_576)
+                .and_then(|_| std::fs::read(path).ok()).and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .filter(|preset| preset["format"] == "soundcraft-plugin-preset" && preset["plugin"] == plugin.as_str());
+            let Some(preset) = preset else { app.ui.status = "The device preset could not be loaded".into(); return; };
+            (plugin, Some(preset["params"].clone()))
+        }
+    };
+    let mut params = json!({"track": track.0, "before": before.min(soundcraft_model::INSERT_SLOTS), "plugin": plugin});
+    if let Some(values) = values { params["params"] = values; }
+    let _ = app.run("mix.insert_before", params);
+}
+
+fn chain_drop(app: &mut SoundApp, ui: &mut Ui, track: TrackId, before: usize, response: &egui::Response) {
+    if let Some(item) = response.dnd_release_payload::<BrowserItem>() { insert_before_item(app, track, before, &item); }
+    if let Some(source) = response.dnd_release_payload::<InsertDrag>() {
+        let _ = app.run("mix.insert_move", json!({"track": track.0, "from_track": source.track.0, "from": source.slot, "to": before.min(soundcraft_model::INSERT_SLOTS), "placement": "before", "copy": ui.input(|input| input.modifiers.alt), "expected_plugin": source.plugin}));
     }
+}
+
+fn chain_gap(app: &mut SoundApp, ui: &mut Ui, track: TrackId, before: usize, height: f32) {
+    let (rect, response) = ui.allocate_exact_size(vec2(22.0, height), Sense::hover());
+    let hovered = response.dnd_hover_payload::<BrowserItem>().is_some() || response.dnd_hover_payload::<InsertDrag>().is_some();
+    if hovered {
+        let x = rect.center().x;
+        ui.painter().line_segment([egui::pos2(x, rect.min.y), egui::pos2(x, rect.max.y)], egui::Stroke::new(3.0, Tokens::current().accent));
+    }
+    chain_drop(app, ui, track, before, &response);
 }
 
 fn drum_note_name(note: u8) -> String {
@@ -605,91 +698,58 @@ fn pad_waveform(app: &mut SoundApp, ui: &mut Ui, track: TrackId, note: u8, sourc
 }
 
 pub fn chain(app: &mut SoundApp, ui: &mut Ui) {
-    if app.player.is_some() {
-        ui.ctx().request_repaint_after_secs(0.03);
-    }
+    if app.player.is_some() { ui.ctx().request_repaint_after_secs(0.03); }
+    let tokens = Tokens::current();
     let Some(track) = selected_track(app).and_then(|id| app.engine.session().track(id).cloned()) else {
-        let drop = ui.add_sized([ui.available_width(), 90.0], egui::Label::new("Drop a plugin or sample here to create a track").sense(Sense::hover()));
-        if let Some(item) = drop.dnd_release_payload::<BrowserItem>() { new_track_drop(app, &item); }
+        let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), ui.available_height().max(80.0)), Sense::hover());
+        ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "Select a track · drop a device or sample to start", crate::theme::regular(13.0), tokens.text_dim);
+        if let Some(item) = response.dnd_release_payload::<BrowserItem>() { new_track_drop(app, &item); }
         return;
     };
     ui.horizontal_wrapped(|ui| {
-        ui.strong(format!("DEVICES · {}", track.name));
-        let input = ui.button(format!("Input: {}", crate::mix_window::input_name(app, &track)));
+        ui.strong(&track.name);
+        let input = ui.small_button(crate::mix_window::input_name(app, &track)).on_hover_text(app.input_status());
         crate::mix_window::route_popup(app, &input, track.id, true);
-        let output = ui.button(format!("Output: {}", crate::mix_window::route_name(app, &track.mixer.output)));
+        ui.weak("→");
+        let output = ui.small_button(crate::mix_window::route_name(app, &track.mixer.output)).on_hover_text(app.output_status());
         crate::mix_window::route_popup(app, &output, track.id, false);
-        if ui.button("Mix").on_hover_text("Open Mixer · Cmd+=").clicked() {
-            let _ = app.run("window.mix", json!({}));
-        }
-        if ui.small_button("Hide").clicked() {
-            app.ui.show_devices = false;
-        }
-    });
-    ui.horizontal_wrapped(|ui| {
         if track.kind == TrackKind::Audio {
-            input_meter(app, ui, track.id);
-            if let Some(problem) = input_route_problem(app, &track) {
-                ui.colored_label(Tokens::current().text_dim, problem);
-            }
             let mut monitor = track.mixer.input_monitor;
-            if ui.checkbox(&mut monitor, "Monitor").changed() {
-                let _ = app.run("mix.input_monitor", json!({"track": track.id.0, "value": monitor}));
-            }
+            if ui.checkbox(&mut monitor, "Monitor").changed() { let _ = app.run("mix.input_monitor", json!({"track": track.id.0, "value": monitor})); }
+            input_meter(app, ui, track.id);
         }
-        ui.label(format!("Input device: {}", app.input_status()));
-        ui.label(format!("Output device: {}", app.output_status()));
-        if ui.button("Audio Setup").clicked() {
-            let _ = app.run("window.playback_engine", json!({}));
-        }
+        if ui.small_button("I/O").on_hover_text("Audio device setup").clicked() { let _ = app.run("window.playback_engine", json!({})); }
+        if ui.small_button("×").on_hover_text("Hide device view").clicked() { app.ui.show_devices = false; }
     });
     ui.separator();
-    let response = egui::ScrollArea::horizontal().id_salt("track_device_chain").show(ui, |ui| {
+    let height = (ui.available_height() - 28.0).clamp(100.0, 280.0);
+    egui::ScrollArea::horizontal().id_salt("track_device_chain").auto_shrink([false, false]).show(ui, |ui| {
         ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            let mut end = 0;
             for visual in 0..=soundcraft_model::INSERT_SLOTS {
                 let instrument = track.instrument_insert_slot() == Some(visual);
                 let insert = if instrument { track.instrument.as_ref() } else { track.mixer.inserts.get(visual).and_then(Option::as_ref) };
                 let Some(insert) = insert else { continue };
+                chain_gap(app, ui, track.id, visual, height);
                 let address = if instrument { soundcraft_mix::INSTRUMENT_SLOT } else { visual };
-                egui::Frame::NONE.fill(Tokens::current().panel_bg).stroke(egui::Stroke::new(1.0, Tokens::current().border)).inner_margin(6.0).show(ui, |ui| {
-                    ui.push_id(("device", track.id.0, address), |ui| device(app, ui, track.id, address, insert));
-                });
+                ui.push_id(("device", track.id.0, address), |ui| device(app, ui, track.id, address, insert, height));
+                end = visual.saturating_add(1).min(soundcraft_model::INSERT_SLOTS);
             }
-            ui.vertical(|ui| {
-                ui.set_min_width(180.0);
-                ui.label(if track.kind == TrackKind::Instrument { "Drop an instrument or effect" } else { "Drop an effect" });
-                if track.instrument.as_ref().is_some_and(|insert| insert.plugin == "drum_rack") {
-                    if ui.button(if app.ui.drum_library.is_empty() { "Assign drum sample library…" } else { "Drum sample library…" }).clicked() {
-                        assign_drum_library(app);
-                    }
-                    if !app.ui.drum_library.is_empty() {
-                        ui.small(app.ui.drum_library.as_str());
-                        if app.browser.library_scan.is_some() {
-                            ui.weak("Scanning drum library…");
-                            ui.ctx().request_repaint_after_secs(0.05);
-                        }
-                        if ui.add_enabled(app.browser.library_scan.is_none() && !app.browser.library_files.is_empty(), egui::Button::new("Load random kit")).clicked() {
-                            load_random_kit(app, track.id, true);
-                        }
-                        if ui.button("Rescan drum library").clicked() {
-                            let path = app.ui.drum_library.clone();
-                            let _ = app.run("ui.drum_library", json!({"path": path}));
-                        }
-                    }
-                }
-                if let Some(slot) = track.mixer.inserts.iter().enumerate().find(|(slot, insert)| insert.is_none() && track.instrument_insert_slot() != Some(*slot)).map(|(slot, _)| slot) {
-                    ui.menu_button("Add effect to next empty insert", |ui| crate::mix_window::plugin_menu(app, ui, track.id, slot, false));
-                } else {
-                    ui.label("All effect slots are in use");
-                }
-                ui.allocate_space(vec2(180.0, 120.0));
+            chain_gap(app, ui, track.id, end, height);
+            let width = ui.clip_rect().width().clamp(200.0, 640.0);
+            let (rect, response) = ui.allocate_exact_size(vec2(width, height + 10.0), Sense::hover());
+            let hovering = response.dnd_hover_payload::<BrowserItem>().is_some() || response.dnd_hover_payload::<InsertDrag>().is_some();
+            ui.painter().rect_filled(rect, 2.0, tokens.slot_bg);
+            ui.painter().rect_stroke(rect.shrink(1.0), 2.0, egui::Stroke::new(1.0, if hovering { tokens.accent } else { tokens.border_light }), egui::StrokeKind::Inside);
+            ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, if track.kind == TrackKind::Instrument { "Drop an instrument, effect or sample" } else { "Drop audio effects here" }, crate::theme::regular(12.0), tokens.text_dim);
+            chain_drop(app, ui, track.id, end, &response);
+            response.context_menu(|ui| {
+                if let Some(slot) = track.mixer.inserts.iter().enumerate().find(|(slot, insert)| insert.is_none() && track.instrument_insert_slot() != Some(*slot)).map(|(slot, _)| slot) { crate::mix_window::plugin_menu(app, ui, track.id, slot, false); }
+                else { ui.label("All inserts are in use"); }
             });
         });
     });
-    let drop = ui.interact(response.inner_rect, ui.id().with("device_chain_drop"), Sense::hover());
-    if let Some(item) = drop.dnd_release_payload::<BrowserItem>() {
-        insert_item(app, track.id, &item);
-    }
 }
 
 pub(crate) fn input_meter(app: &SoundApp, ui: &mut Ui, track: TrackId) {
@@ -984,8 +1044,10 @@ fn pad_effects(app: &mut SoundApp, ui: &mut Ui, track: TrackId, instrument: &Ins
         prepare_plugins(app);
         egui::ScrollArea::vertical().id_salt(("pad_effects",track.0,note)).max_height(190.0).show(ui, |ui| {
             let slots = instrument.pad_effects.get(&note);
+            let first_empty = (0..soundcraft_model::INSERT_SLOTS).find(|slot| slots.and_then(|slots| slots.get(*slot)).is_none_or(Option::is_none));
             for slot in 0..soundcraft_model::INSERT_SLOTS {
                 let insert = slots.and_then(|slots| slots.get(slot)).and_then(Option::as_ref);
+                if insert.is_none() && first_empty != Some(slot) { continue; }
                 ui.push_id(("pad_effect",track.0,note,slot), |ui| {
                     let response = egui::Frame::NONE.fill(Tokens::current().panel_bg)
                         .stroke(egui::Stroke::new(1.0, Tokens::current().border)).inner_margin(3.0).show(ui, |ui| {
@@ -1001,20 +1063,7 @@ fn pad_effects(app: &mut SoundApp, ui: &mut Ui, track: TrackId, instrument: &Ins
                                     let _ = app.run("mix.drum_pad_effect", json!({"track":track.0,"note":note,"slot":slot,"action":"remove"}));
                                 }
                             } else {
-                                ui.menu_button("Add effect…", |ui| {
-                                    let groups = crate::plugin_browser::groups(&app.browser.plugins, app.browser.grouping, app.browser.format, Some(false), &app.browser.query);
-                                    for (group, effects) in groups {
-                                        ui.menu_button(group, |ui| {
-                                            for effect in effects {
-                                                if soundcraft_dsp::is_generator(&effect.id) { continue; }
-                                                if ui.button(format!("{} · {}", effect.name, effect.format.label())).clicked() {
-                                                    pad_item(app, track, note, Some(slot), &BrowserItem::Plugin(effect.id.clone()));
-                                                    ui.close();
-                                                }
-                                            }
-                                        });
-                                    }
-                                });
+                                ui.add_sized([220.0, 40.0], egui::Label::new("Drop an effect here"));
                             }
                         });
                         if let Some(insert) = insert {

@@ -261,3 +261,10 @@ pub fn retry_plugin(id: &str) {
     #[cfg(target_arch = "wasm32")]
     let _ = id;
 }
+
+pub fn set_scan_progress(observer: fn(usize, usize, Option<&str>)) {
+    #[cfg(not(target_arch = "wasm32"))]
+    registry::set_scan_progress(observer);
+    #[cfg(target_arch = "wasm32")]
+    let _ = observer;
+}

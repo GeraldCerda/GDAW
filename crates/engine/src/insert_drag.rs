@@ -78,18 +78,30 @@ pub fn move_insert(engine: &mut Engine, params: &Value) -> Result<Value> {
     };
     let from = parse("from")?;
     let to = parse("to")?;
+    let before = params.get("placement").and_then(Value::as_str) == Some("before");
     let copy = params.get("copy").and_then(Value::as_bool).unwrap_or(false);
     let before_source = slots(engine.session().track(source).ok_or_else(|| error("Source track is missing"))?);
     let before_target = slots(engine.session().track(target).ok_or_else(|| error("Destination track is missing"))?);
     let device = before_source[from].clone().ok_or_else(|| error("The source insert is empty"))?;
     if params.get("expected_plugin").and_then(Value::as_str).is_some_and(|expected| expected != device.insert.plugin) { return Err(error("The source insert changed during the drag. Try again.")); }
-    if from == to && source == target { return Ok(json!({"track": target.0, "slot": to, "reset": []})); }
+    if from == to && source == target && !copy { return Ok(json!({"track": target.0, "slot": to, "reset": []})); }
+    let mut destination_slot = to;
     let mut source_slots = before_source.clone();
     let mut target_slots = before_target.clone();
     if source == target && !copy {
+        let destination = to.saturating_sub(usize::from(before && from < to));
+        destination_slot = destination;
         let device = source_slots.remove(from);
-        source_slots.insert(to, device);
+        source_slots.insert(destination, device);
         target_slots = source_slots.clone();
+    } else if before {
+        let empty = target_slots.iter().take(INSERT_SLOTS).position(Option::is_none).ok_or_else(|| error("This track has no free insert"))?;
+        target_slots.remove(empty);
+        let destination = to.saturating_sub(usize::from(empty < to));
+        destination_slot = destination;
+        target_slots.insert(destination, Some(device));
+        if !copy { source_slots[from] = None; }
+        if source == target { source_slots = target_slots.clone(); }
     } else {
         if copy && target_slots[to].is_some() { return Err(error("Drop a copied device onto an empty insert")); }
         if copy { target_slots[to] = Some(device); }
@@ -105,7 +117,7 @@ pub fn move_insert(engine: &mut Engine, params: &Value) -> Result<Value> {
     if source != target { reset_slots(source, &before_source, &source_slots, &mut reset); }
     reset_slots(target, &before_target, &target_slots, &mut reset);
     *engine.session_mut() = staged;
-    Ok(json!({"track": target.0, "slot": to, "copy": copy, "reset": reset}))
+    Ok(json!({"track": target.0, "slot": destination_slot, "copy": copy, "reset": reset}))
 }
 
 #[cfg(test)]
@@ -174,4 +186,63 @@ mod tests {
         assert_eq!(engine.session().to_json().unwrap(), before);
     }
 
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod chain_insertion_tests {
+    use super::*;
+
+    #[test]
+    fn inserting_a_block_before_existing_devices_shifts_automation_and_undoes_once() {
+        let mut engine = Engine::default();
+        let track = engine.session_mut().add_track(TrackKind::Audio, soundcraft_model::ChannelFormat::Stereo, None);
+        let mut first = Insert::new("gain");
+        first.params.insert("gain".into(), -9.0);
+        let mut second = Insert::new("gain");
+        second.params.insert("gain".into(), -12.0);
+        let model = engine.session_mut().track_mut(track).unwrap();
+        model.mixer.inserts[0] = Some(first.clone());
+        model.mixer.inserts[1] = Some(second.clone());
+        let mut lane = soundcraft_model::AutomationLane::new(AutoParam::Plugin { slot: 0, param: "gain".into() });
+        lane.set_point(0, -9.0);
+        model.automation.push(lane);
+        let before = engine.session().to_json().unwrap();
+        let result = engine.execute("mix.insert_before", &json!({"track": track.0, "before": 0, "plugin": "gain"})).unwrap();
+        assert_eq!(result["slot"], 0);
+        let model = engine.session().track(track).unwrap();
+        assert_eq!(model.mixer.inserts[1].as_ref(), Some(&first));
+        assert_eq!(model.mixer.inserts[2].as_ref(), Some(&second));
+        assert!(model.lane(&AutoParam::Plugin { slot: 1, param: "gain".into() }).is_some());
+        assert!(engine.undo());
+        assert_eq!(engine.session().to_json().unwrap(), before);
+    }
+
+    #[test]
+    fn a_cross_track_gap_drop_inserts_without_swapping_the_destination_device() {
+        let mut engine = Engine::default();
+        let source = engine.session_mut().add_track(TrackKind::Audio, soundcraft_model::ChannelFormat::Stereo, None);
+        let target = engine.session_mut().add_track(TrackKind::Audio, soundcraft_model::ChannelFormat::Stereo, None);
+        let mut effect = Insert::new("gain");
+        effect.params.insert("gain".into(), -3.0);
+        engine.session_mut().track_mut(source).unwrap().mixer.inserts[0] = Some(effect.clone());
+        engine.session_mut().track_mut(target).unwrap().mixer.inserts[0] = Some(Insert::new("gain"));
+        engine.execute("mix.insert_move", &json!({"from_track": source.0, "track": target.0, "from": 0, "to": 0, "placement": "before"})).unwrap();
+        assert!(engine.session().track(source).unwrap().mixer.inserts[0].is_none());
+        let target = engine.session().track(target).unwrap();
+        assert_eq!(target.mixer.inserts[0].as_ref(), Some(&effect));
+        assert!(target.mixer.inserts[1].is_some());
+    }
+
+    #[test]
+    fn copying_before_a_device_retains_the_source_and_reports_the_new_slot() {
+        let mut engine = Engine::default();
+        let track = engine.session_mut().add_track(TrackKind::Audio, soundcraft_model::ChannelFormat::Stereo, None);
+        engine.session_mut().track_mut(track).unwrap().mixer.inserts[0] = Some(Insert::new("gain"));
+        let result = engine.execute("mix.insert_move", &json!({"track": track.0, "from": 0, "to": 1, "placement": "before", "copy": true})).unwrap();
+        assert_eq!(result["slot"], 1);
+        let model = engine.session().track(track).unwrap();
+        assert!(model.mixer.inserts[0].is_some());
+        assert!(model.mixer.inserts[1].is_some());
+    }
 }

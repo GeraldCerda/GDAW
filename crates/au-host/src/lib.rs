@@ -372,3 +372,10 @@ pub fn cached() -> Option<Vec<AuDescriptor>> {
     #[cfg(not(target_os = "macos"))]
     { Some(Vec::new()) }
 }
+
+pub fn set_scan_progress(observer: fn(usize, usize, Option<&str>)) {
+    #[cfg(target_os = "macos")]
+    registry::set_scan_progress(observer);
+    #[cfg(not(target_os = "macos"))]
+    let _ = observer;
+}

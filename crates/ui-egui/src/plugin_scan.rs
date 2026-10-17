@@ -6,6 +6,53 @@ pub struct ScanProgress {
     pub completed: usize,
     pub current: std::collections::BTreeMap<String, String>,
     pub failures: Vec<(String, String)>,
+    pub formats: std::collections::BTreeMap<String, FormatProgress>,
+    pub cached: usize,
+}
+
+#[derive(Clone, Default)]
+pub struct FormatProgress {
+    pub total: Option<usize>,
+    pub completed: usize,
+    pub finished: bool,
+}
+
+impl ScanProgress {
+    pub fn fraction(&self) -> Option<f32> {
+        if self.formats.is_empty() || self.formats.values().any(|format| format.total.is_none()) { return None; }
+        let total = self.formats.values().map(|format| format.total.unwrap_or(0)).sum::<usize>();
+        if total == 0 { return Some(if self.formats.values().all(|format| format.finished) { 1.0 } else { 0.0 }); }
+        Some((self.completed as f32 / total as f32).clamp(0.0, 1.0))
+    }
+}
+
+pub fn report_format(format: &str, total: usize, completed: usize, current: Option<&str>) {
+    let mut state = progress_state().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let entry = state.formats.entry(format.into()).or_default();
+    entry.total = current.map(|_| total);
+    entry.completed = completed.min(total);
+    state.completed = state.formats.values().map(|format| format.completed).sum();
+    match current {
+        Some(path) if !path.is_empty() => { state.current.insert(format.into(), path.into()); }
+        _ => { state.current.remove(format); }
+    }
+}
+
+pub fn finish_format(format: &str) {
+    let mut state = progress_state().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let entry = state.formats.entry(format.into()).or_default();
+    entry.finished = true;
+    if entry.total.is_none() { entry.total = Some(entry.completed); }
+    state.current.remove(format);
+}
+
+pub fn format_key(format: crate::plugin_browser::PluginFormat) -> &'static str {
+    match format {
+        crate::plugin_browser::PluginFormat::Au => "--gdaw-scan-au",
+        crate::plugin_browser::PluginFormat::Vst3 => "--gdaw-scan-vst3",
+        crate::plugin_browser::PluginFormat::Clap => "--gdaw-scan-clap",
+        _ => "built-in",
+    }
 }
 
 static FORCE_SCAN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -21,7 +68,9 @@ pub fn progress() -> ScanProgress {
 
 pub fn begin(rescan: bool) {
     FORCE_SCAN.store(rescan, std::sync::atomic::Ordering::Release);
-    *progress_state().lock().unwrap_or_else(std::sync::PoisonError::into_inner) = ScanProgress::default();
+    let mut state = ScanProgress::default();
+    for key in ["--gdaw-scan-au", "--gdaw-scan-vst3", "--gdaw-scan-clap"] { state.formats.insert(key.into(), FormatProgress::default()); }
+    *progress_state().lock().unwrap_or_else(std::sync::PoisonError::into_inner) = state;
 }
 
 pub fn cache_dir() -> Option<PathBuf> {
@@ -69,6 +118,9 @@ pub fn run_helper(args: &[String]) -> Option<i32> {
 }
 
 pub fn install() {
+    soundcraft_vst3_host::set_scan_progress(|total, completed, current| report_format("--gdaw-scan-vst3", total, completed, current));
+    soundcraft_clap_host::set_scan_progress(|total, completed, current| report_format("--gdaw-scan-clap", total, completed, current));
+    soundcraft_au_host::set_scan_progress(|total, completed, current| report_format("--gdaw-scan-au", total, completed, current));
     soundcraft_vst3_host::set_bundle_scanner(|path| {
         isolated(path, "--gdaw-scan-vst3").map_err(|error| soundcraft_vst3_host::Vst3Error::Load(path.display().to_string(), error))
     });
@@ -119,7 +171,6 @@ fn isolated<T: DeserializeOwned>(path: &Path, format: &str) -> Result<Vec<T>, St
         }
     }
     let mut state = progress_state().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    state.completed = state.completed.saturating_add(1);
     state.current.remove(format);
     if let Err(error) = &result {
         if state.failures.len() < 4096 { state.failures.push((path.display().to_string(), error.clone())); }
@@ -136,7 +187,11 @@ fn isolated_inner<T: DeserializeOwned>(path: &Path, format: &str) -> Result<Vec<
         if let Some(file) = cache.as_ref().and_then(|path| std::fs::File::open(path).ok()) {
             let mut bytes = Vec::new();
             if file.take(4_194_305).read_to_end(&mut bytes).is_ok() && bytes.len() <= 4_194_304 {
-                if let Ok(result) = serde_json::from_slice::<Result<Vec<T>, String>>(&bytes) { return result; }
+                if let Ok(result) = serde_json::from_slice::<Result<Vec<T>, String>>(&bytes) {
+                    let mut state = progress_state().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    state.cached = state.cached.saturating_add(1);
+                    return result;
+                }
             }
         }
     }
@@ -310,5 +365,28 @@ pub fn retry_failed_scans() {
         for format in ["--gdaw-scan-vst3", "--gdaw-scan-clap"] {
             if let Some(cache) = cache_path(Path::new(&path), format) { let _ = std::fs::remove_file(cache); }
         }
+    }
+}
+
+#[cfg(test)]
+mod scan_progress_tests {
+    use super::*;
+
+    #[test]
+    fn unknown_inventories_do_not_publish_a_misleading_fraction() {
+        let mut progress = ScanProgress::default();
+        progress.formats.insert("VST3".into(), FormatProgress { total: Some(20), completed: 10, finished: false });
+        progress.formats.insert("AU".into(), FormatProgress::default());
+        progress.completed = 10;
+        assert_eq!(progress.fraction(), None);
+        progress.formats.insert("AU".into(), FormatProgress { total: Some(20), completed: 0, finished: false });
+        assert_eq!(progress.fraction(), Some(0.25));
+    }
+
+    #[test]
+    fn an_empty_completed_inventory_finishes_without_dividing_by_zero() {
+        let mut progress = ScanProgress::default();
+        progress.formats.insert("CLAP".into(), FormatProgress { total: Some(0), completed: 0, finished: true });
+        assert_eq!(progress.fraction(), Some(1.0));
     }
 }

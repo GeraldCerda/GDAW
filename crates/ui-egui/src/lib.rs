@@ -22,6 +22,7 @@ pub mod palette;
 pub mod panels;
 pub mod plugin_browser;
 pub mod plugin_scan;
+pub mod splash;
 mod sample_browser;
 mod developer_panel;
 mod parameter_automation;
@@ -206,10 +207,10 @@ impl Default for UiState {
             recent_samples: Vec::new(),
             auto_preview_samples: true,
             show_developer_api: false,
-            appearance_revision: 1,
+            appearance_revision: 2,
             insert_views_revision: 1,
             configurations: Vec::new(),
-            theme: theme::ThemeMode::Light,
+            theme: theme::ThemeMode::Dark,
             window_size: [1600.0, 1000.0],
             window_maximized: false,
             ui_scale: 1.0,
@@ -463,6 +464,8 @@ impl SoundApp {
         let visual = result.get("slot").and_then(Value::as_u64).and_then(|slot| usize::try_from(slot).ok())
             .or_else(|| self.engine.session().track(track).and_then(|track| track.instrument_insert_slot())).unwrap_or(0);
         let address = if self.engine.session().track(track).is_some_and(|track| track.instrument_insert_slot() == Some(visual)) { soundcraft_mix::INSTRUMENT_SLOT } else { visual };
+        self.browser.selected_device = Some((track, address));
+        self.browser.folded_devices.remove(&(track, address));
         if !self.pending_editors.iter().any(|(id, slot, _)| *id == track && *slot == address) { self.pending_editors.push((track, address, 0)); }
     }
 
@@ -495,7 +498,7 @@ impl SoundApp {
         if let Some(r) = menus::run_ui_command(self, id, &params) {
             return r;
         }
-        if id.starts_with("session.save") || id.starts_with("file.bounce") || matches!(id, "mix.insert_move" | "file.export_project" | "file.export_exchange") {
+        if id.starts_with("session.save") || id.starts_with("file.bounce") || matches!(id, "mix.insert_move" | "mix.insert_before" | "file.export_project" | "file.export_exchange") {
             // Third-party plugins keep state the session can't see: store it first.
             self.capture_plugin_states();
         }
@@ -509,7 +512,7 @@ impl SoundApp {
         let replacing = matches!(id, "session.new" | "session.open" | "session.close" | "session.revert");
         match self.engine.execute(id, &params) {
             Ok(v) => {
-                if id == "mix.insert_move" {
+                if matches!(id, "mix.insert_move" | "mix.insert_before") {
                     let reset: Vec<_> = v.get("reset").and_then(Value::as_array).into_iter().flatten().filter_map(|entry| {
                         let track = TrackId(entry["track"].as_u64()?);
                         let slot = if entry["instrument"].as_bool() == Some(true) { soundcraft_mix::INSTRUMENT_SLOT } else { usize::try_from(entry["slot"].as_u64()?).ok()? };
@@ -517,6 +520,7 @@ impl SoundApp {
                     }).collect();
                     if let Some(player) = &self.player { player.invalidate_plugin_slots(&reset); }
                     self.ui.plugin_windows.retain(|window| !reset.contains(window));
+                    self.browser.folded_devices.clear();
                     self.show_insert_result(&v);
                 }
                 if replacing { crate::sample_browser::stop(self); self.parameter_automation = parameter_automation::ParameterAutomation::default(); }
@@ -549,7 +553,7 @@ impl SoundApp {
                 Ok(v)
             }
             Err(e) => {
-                if matches!(id, "mix.insert" | "mix.instrument") {
+                if matches!(id, "mix.insert" | "mix.insert_before" | "mix.instrument") {
                     if let Some(plugin) = params.get("plugin").and_then(Value::as_str).filter(|plugin| soundcraft_mix::is_third_party(plugin)) {
                         if crate::mix_window::plugin_info(plugin).is_none() { crate::devices::exclude_plugin(self, plugin, "Could not load this plugin. Check authorization or compatibility, then retry from Unavailable / hidden."); }
                     }
@@ -1355,9 +1359,9 @@ impl SoundApp {
                 ctx.request_repaint();
             }
         }
-        if self.ui.appearance_revision == 0 {
-            self.ui.theme = theme::ThemeMode::Light;
-            self.ui.appearance_revision = 1;
+        if self.ui.appearance_revision < 2 {
+            self.ui.theme = theme::ThemeMode::Dark;
+            self.ui.appearance_revision = 2;
         }
         if self.ui.insert_views_revision == 0 {
             self.engine.session_mut().edit.set_flag("edit_view.inserts_ae", true);
@@ -1412,7 +1416,7 @@ impl SoundApp {
         let position = self.position();
         let playing = self.is_playing();
         self.parameter_automation.step(&mut self.engine, position, playing, ctx.input(|input| input.pointer.any_down()), gestures);
-        if self.engine.revision != self.last_rev && !(self.browser.startup_scan && self.browser.plugin_scan.is_some()) {
+        if self.engine.revision != self.last_rev && !self.browser.startup_scan {
             self.last_rev = self.engine.revision;
             if let Some(p) = &self.player {
                 p.update_session(self.engine.session_arc());
@@ -1420,7 +1424,8 @@ impl SoundApp {
         }
         self.open_pending_editors(ctx);
         self.autosave();
-        if self.recorder.is_none()
+        if !self.browser.startup_hold
+            && self.recorder.is_none()
             && !self.recorder_failed
             && self.engine.session().tracks.iter().any(physical_input_track)
         {

@@ -41,14 +41,26 @@ fn version_string(v: u32) -> String {
     format!("{}.{}.{}", v >> 16, (v >> 8) & 0xff, v & 0xff)
 }
 
+type ScanProgress = fn(usize, usize, Option<&str>);
+static SCAN_PROGRESS: OnceLock<ScanProgress> = OnceLock::new();
+
+pub fn set_scan_progress(observer: ScanProgress) { let _ = SCAN_PROGRESS.set(observer); }
+
+fn report_scan(total: usize, completed: usize, current: Option<&str>) {
+    if let Some(observer) = SCAN_PROGRESS.get() { observer(total, completed, current); }
+}
+
 fn list() -> Vec<AuDescriptor> {
-    let mut out: Vec<AuDescriptor> = Vec::new();
-    for ty in SUPPORTED_TYPES {
-        for c in ffi::components(ty) {
-            let id = crate::format_id(c.ty, c.subtype, c.manufacturer);
-            if out.iter().any(|o| o.id == id) {
-                continue;
-            }
+    report_scan(0, 0, None);
+    let components: Vec<_> = SUPPORTED_TYPES.into_iter().flat_map(ffi::components).collect();
+    let total = components.len();
+    report_scan(total, 0, Some(""));
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for (index, c) in components.into_iter().enumerate() {
+        report_scan(total, index, Some(&c.name));
+        let id = crate::format_id(c.ty, c.subtype, c.manufacturer);
+        if seen.insert(id.clone()) {
             let (vendor, name) = crate::split_component_name(&c.name);
             let name = if name.is_empty() { "Audio Unit".to_string() } else { name };
             out.push(AuDescriptor {
@@ -58,11 +70,10 @@ fn list() -> Vec<AuDescriptor> {
                 subtype: crate::fourcc_string(c.subtype),
                 manufacturer: crate::fourcc_string(c.manufacturer),
                 version: version_string(c.version),
-                id,
-                name,
-                vendor,
+                id, name, vendor,
             });
         }
+        report_scan(total, index + 1, Some(""));
     }
     out.sort_by_key(|d| d.name.to_lowercase());
     out
@@ -81,10 +92,10 @@ pub fn scan() -> Vec<AuDescriptor> {
 }
 
 pub fn rescan() -> Vec<AuDescriptor> {
-    let mut r = registry().lock().unwrap_or_else(PoisonError::into_inner);
-    r.scanned = None;
-    r.failed.clear();
-    ensure_scanned(&mut r).clone()
+    registry().lock().unwrap_or_else(PoisonError::into_inner).failed.clear();
+    let descriptors = list();
+    registry().lock().unwrap_or_else(PoisonError::into_inner).scanned = Some(descriptors.clone());
+    descriptors
 }
 
 fn leak(s: String) -> &'static str {
