@@ -71,6 +71,23 @@
         <array><string>application/x-gdaw-session</string></array>
       </dict>
     </dict>
+    <dict>
+      <key>UTTypeIdentifier</key>
+      <string>com.geraldcerda.gdaw.project</string>
+      <key>UTTypeDescription</key>
+      <string>GDAW Portable Project</string>
+      <key>UTTypeConformsTo</key>
+      <array><string>public.data</string><string>public.archive</string></array>
+      <key>UTTypeIconFile</key>
+      <string>GDAW</string>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key>
+        <array><string>gdawz</string></array>
+        <key>public.mime-type</key>
+        <array><string>application/x-gdaw-project</string></array>
+      </dict>
+    </dict>
   </array>
 
   <key>CFBundleDocumentTypes</key>
@@ -86,6 +103,18 @@
       <string>GDAW</string>
       <key>LSItemContentTypes</key>
       <array><string>com.geraldcerda.gdaw.session</string></array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>GDAW Portable Project</string>
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
+      <key>LSHandlerRank</key>
+      <string>Owner</string>
+      <key>CFBundleTypeIconFile</key>
+      <string>GDAW</string>
+      <key>LSItemContentTypes</key>
+      <array><string>com.geraldcerda.gdaw.project</string></array>
     </dict>
     <!-- Audio and MIDI: offered under "Open With" (imported into a session), never taking over
          the user's default player. -->

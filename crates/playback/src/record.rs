@@ -378,7 +378,7 @@ impl Recorder {
 
     pub fn finish(&mut self) -> Takes {
         self.shared.armed.store(false, Ordering::SeqCst);
-        let (takes, problem) = self.writer.take().and_then(|(w, _)| w.join().ok()).unwrap_or_default();
+        let (takes, problem) = self.writer.take().map(|(writer, _)| join_writer(writer)).unwrap_or_default();
         let lost = self.shared.dropped.swap(0, Ordering::Relaxed) / self.channels.max(1);
         let slow =
             (lost > 0).then(|| format!("{} ms of input lost: the disk was too slow", lost.saturating_mul(1000) / self.sample_rate.max(1) as usize));
@@ -389,6 +389,13 @@ impl Recorder {
 impl Drop for Recorder {
     fn drop(&mut self) {
         self.finish();
+    }
+}
+
+fn join_writer(writer: std::thread::JoinHandle<Takes>) -> Takes {
+    match writer.join() {
+        Ok(result) => result,
+        Err(_) => (Vec::new(), Some("the take writer thread failed; partially recorded WAV files may remain on disk".into())),
     }
 }
 
@@ -930,3 +937,16 @@ mod input_config_tests {
 }
 
 
+
+#[cfg(test)]
+mod writer_failure_tests {
+    use super::*;
+
+    #[test]
+    fn writer_thread_failure_is_reported_instead_of_disappearing() {
+        let writer = std::thread::spawn(|| -> Takes { std::panic::panic_any("injected writer failure") });
+        let (takes, error) = join_writer(writer);
+        assert!(takes.is_empty());
+        assert!(error.is_some_and(|message| message.contains("take writer thread failed")));
+    }
+}

@@ -60,7 +60,6 @@ pub fn file_found(path: impl AsRef<Path>) -> bool {
     crate::file_access::check_read(path).is_ok() && path.is_file()
 }
 
-/// Create `dir` and its parents, inside the automation write root when there is one.
 pub(crate) fn path_exists_for_write(path: impl AsRef<Path>) -> Result<bool> {
     let path = path.as_ref();
     crate::file_access::check_write(path).map_err(EngineError::Io)?;
