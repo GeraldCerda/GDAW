@@ -44,6 +44,11 @@ jobs:
           cache-on-failure: true
       - name: Build native desktop binary
         run: |
-          cargo +stable build --locked --release --target aarch64-apple-darwin -p soundcraft
+          cargo +stable build --locked --release --target aarch64-apple-darwin -p soundcraft -p soundcraft-cli
           test -x target/aarch64-apple-darwin/release/soundcraft
           file target/aarch64-apple-darwin/release/soundcraft
+          test -x target/aarch64-apple-darwin/release/soundcraft-cli
+      - name: Build and inspect Apple Silicon installer
+        run: |
+          bash packaging/macos/package.sh --arch aarch64 --skip-build
+          test "$(find dist/release -maxdepth 1 -name 'gdaw-*-macos-aarch64.dmg' | wc -l | tr -d ' ')" = "1"

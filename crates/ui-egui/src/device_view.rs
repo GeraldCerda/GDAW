@@ -17,7 +17,7 @@ fn axis(app: &mut SoundApp, ui: &mut Ui, track: TrackId, visual: usize, insert: 
     let (name, current, other) = if horizontal { ("x", &insert.controls.x, &insert.controls.y) } else { ("y", &insert.controls.y, &insert.controls.x) };
     let mut selected = current.clone();
     let label = current.as_ref().and_then(|id| info.params.iter().find(|parameter| parameter.id == id)).map_or("none", |parameter| parameter.name);
-    egui::ComboBox::from_id_salt(("axis", name)).width(98.0).selected_text(label).show_ui(ui, |ui| {
+    egui::ComboBox::from_id_salt(("axis", track.0, visual, name)).width(98.0).selected_text(label).show_ui(ui, |ui| {
         ui.selectable_value(&mut selected, None, "none");
         for parameter in info.params.iter().filter(|parameter| other.as_deref() != Some(parameter.id)) {
             ui.selectable_value(&mut selected, Some(parameter.id.to_string()), parameter.name);

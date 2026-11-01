@@ -357,6 +357,9 @@ impl Recorder {
         if let Some(e) = self.shared.failed.lock().unwrap_or_else(PoisonError::into_inner).take() {
             return Some(Trouble::Disk(e));
         }
+        if self.shared.armed.load(Ordering::Acquire) && self.writer.as_ref().is_some_and(|(writer, _)| writer.is_finished()) {
+            return Some(Trouble::Disk("the take writer stopped while recording; partial WAV files may remain on disk".into()));
+        }
         let name = &self.device_name;
         match self.shared.fault.load(Ordering::Relaxed) {
             GONE => return Some(Trouble::Device(format!("“{name}” was disconnected"))),
