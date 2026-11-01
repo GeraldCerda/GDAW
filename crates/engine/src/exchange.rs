@@ -9,7 +9,7 @@ use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
 struct Staging { path: PathBuf, published: bool }
 
 impl Drop for Staging {
-    fn drop(&mut self) { if !self.published { let _ = std::fs::remove_dir_all(&self.path); } }
+    fn drop(&mut self) { if !self.published { let _ = crate::io::remove_directory(&self.path); } }
 }
 
 pub struct Exchange {
@@ -31,7 +31,7 @@ impl Exchange {
         let path = params.get("dir").and_then(Value::as_str).filter(|path| !path.is_empty()).ok_or_else(|| fail("Choose a new export folder"))?;
         let destination = PathBuf::from(path);
         crate::file_access::check_write(&destination).map_err(EngineError::Io)?;
-        if destination.exists() { return Err(fail("The export folder already exists. Choose a new folder name so no existing files are replaced.")); }
+        if crate::io::path_exists_for_write(&destination)? { return Err(fail("The export folder already exists. Choose a new folder name so no existing files are replaced.")); }
         let source = engine.session_arc();
         let range = if params.get("start").is_some() || params.get("end").is_some() { crate::cmd::range_param(engine, "file.export_exchange", params)? }
             else { Range::new(0, source.content_end().saturating_add(source.sample_rate.samples(2.0)).max(1)) };
@@ -46,7 +46,7 @@ impl Exchange {
         let staging = (0..128).find_map(|_| {
             let path = parent.join(format!(".gdaw-export-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
             if crate::file_access::check_write(&path).is_err() { return None; }
-            std::fs::create_dir(&path).ok().map(|()| Staging { path, published: false })
+            crate::io::create_directory_new(&path).ok().map(|()| Staging { path, published: false })
         }).ok_or_else(|| fail("Cannot create a temporary export folder"))?;
         let midi = crate::io::export_midi(engine, None)?;
         crate::io::write_path(staging.path.join("Song.mid"), midi)?;
@@ -95,8 +95,8 @@ impl Exchange {
                 let manifest = json!({"format": "gdaw-exchange", "version": 1, "session": self.source.name, "sample_rate": self.source.sample_rate.hz(), "bit_depth": 24, "channels": soundcraft_mix::main_channels(&self.source), "audio_origin_samples": self.range.start, "audio_end_samples": self.range.end, "midi_origin_samples": 0, "midi": "Song.mid", "document": "Session Document.json", "files": self.rendered, "notes": ["WAVs have equal lengths and the same start. Import them at audio_origin_samples.", "MIDI keeps the original song timeline and tempo map.", "Rendered track files preserve track processing; bus/send returns and master processing are present in the reference mix.", "The JSON document is metadata; use a .gdawz project to transfer the editable native session and media."]});
                 let bytes = serde_json::to_vec_pretty(&manifest).map_err(|error| EngineError::Io(error.to_string()))?;
                 crate::io::write_path(self.staging.path.join("GDAW Exchange.json"), bytes)?;
-                if self.destination.exists() { return Err(EngineError::Io("The destination appeared during export. Choose another folder name.".into())); }
-                std::fs::rename(&self.staging.path, &self.destination).map_err(|error| EngineError::Io(error.to_string()))?;
+                if crate::io::path_exists_for_write(&self.destination)? { return Err(EngineError::Io("The destination appeared during export. Choose another folder name.".into())); }
+                crate::io::publish_directory(&self.staging.path, &self.destination)?;
                 self.staging.published = true;
                 return Ok(Some(json!({"directory": self.destination, "files": self.rendered.len(), "format": "WAV 24-bit + MIDI + JSON", "start": self.range.start, "end": self.range.end})));
             }

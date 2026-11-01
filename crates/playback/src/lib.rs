@@ -817,6 +817,7 @@ impl Player {
                         Ok(stream) => {
                             if let Err(e) = stream.play() {
                                 log::warn!("audio stream failed to start: {e}");
+                                continue;
                             }
                             let buffer = match config.buffer_size {
                                 cpal::BufferSize::Fixed(n) => Some(n),

@@ -61,6 +61,34 @@ pub fn file_found(path: impl AsRef<Path>) -> bool {
 }
 
 /// Create `dir` and its parents, inside the automation write root when there is one.
+pub(crate) fn path_exists_for_write(path: impl AsRef<Path>) -> Result<bool> {
+    let path = path.as_ref();
+    crate::file_access::check_write(path).map_err(EngineError::Io)?;
+    Ok(path.exists())
+}
+
+pub(crate) fn create_directory_new(path: impl AsRef<Path>) -> Result<()> {
+    let path = path.as_ref();
+    crate::file_access::check_write(path).map_err(EngineError::Io)?;
+    std::fs::create_dir(path).map_err(|error| EngineError::Io(format!("{}: {error}", path.display())))
+}
+
+pub(crate) fn remove_directory(path: impl AsRef<Path>) -> Result<()> {
+    let path = path.as_ref();
+    crate::file_access::check_write(path).map_err(EngineError::Io)?;
+    std::fs::remove_dir_all(path).map_err(|error| EngineError::Io(format!("{}: {error}", path.display())))
+}
+
+pub(crate) fn publish_directory(source: impl AsRef<Path>, destination: impl AsRef<Path>) -> Result<()> {
+    let source = source.as_ref();
+    let destination = destination.as_ref();
+    crate::file_access::check_write(source).map_err(EngineError::Io)?;
+    if path_exists_for_write(destination)? {
+        return Err(EngineError::Io(format!("{}: destination already exists", destination.display())));
+    }
+    std::fs::rename(source, destination).map_err(|error| EngineError::Io(format!("{}: {error}", destination.display())))
+}
+
 pub(crate) fn make_dir(dir: impl AsRef<Path>) -> Result<()> {
     let dir = dir.as_ref();
     crate::file_access::check_write(dir).map_err(EngineError::Io)?;
@@ -2153,5 +2181,38 @@ mod portable_project_tests {
         assert_eq!(reopened.session().pool.get(source.id).unwrap().buffer.channels[0][0], 0.5);
         assert_eq!(session_file("New Song"), PathBuf::from("New Song.gdaw"));
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod checked_export_tests {
+    use super::*;
+    use crate::file_access::{AutomationRoots, confine};
+
+    #[test]
+    fn directory_publication_obeys_write_root_and_preserves_existing_exports() {
+        let parent = std::env::temp_dir().join(format!("gdaw-export-access-{}", std::process::id()));
+        let allowed = parent.join("allowed");
+        std::fs::create_dir_all(&allowed).unwrap();
+        let roots = AutomationRoots::new(None, Some(&allowed)).unwrap().unwrap();
+        confine(Some(&roots), || {
+            assert!(create_directory_new(parent.join("outside")).is_err());
+            assert!(path_exists_for_write(parent.join("outside")).is_err());
+            assert!(remove_directory(parent.join("outside")).is_err());
+            let first = allowed.join("first");
+            let published = allowed.join("published");
+            create_directory_new(&first).unwrap();
+            publish_directory(&first, &published).unwrap();
+            assert!(!first.exists());
+            assert!(published.is_dir());
+            let second = allowed.join("second");
+            create_directory_new(&second).unwrap();
+            assert!(publish_directory(&second, &published).is_err());
+            assert!(second.is_dir());
+            assert!(published.is_dir());
+            remove_directory(&second).unwrap();
+            remove_directory(&published).unwrap();
+        });
+        std::fs::remove_dir_all(&parent).unwrap();
     }
 }

@@ -108,7 +108,7 @@ pub fn specs() -> Vec<CommandSpec> {
             let path = str_param(p, "path").ok_or_else(|| bad("file.export_project", "path is required"))?;
             let target = crate::io::project_file(path)?;
             crate::file_access::check_write(&target).map_err(EngineError::Io)?;
-            if target.exists() && !bool_or(p, "replace", false) { return Err(bad("file.export_project", "Destination exists; choose another name or pass replace: true")); }
+            if crate::io::path_exists_for_write(&target)? && !bool_or(p, "replace", false) { return Err(bad("file.export_project", "Destination exists; choose another name or pass replace: true")); }
             let path = target.to_string_lossy().into_owned();
             let media = crate::io::export_project(e, &path)?;
             Ok(json!({"path": path, "media_files": media, "format": "gdawz"}))
