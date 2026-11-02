@@ -91,7 +91,7 @@ impl Rig {
 #[test]
 fn double_clicking_a_midi_clip_with_the_grabber_opens_the_midi_editor() {
     let mut r = Rig::new("grabber");
-    let (keys, at) = r.clip("Keys");
+    let (keys, at) = r.reveal_clip("Keys");
     assert_eq!(r.editing(), None);
     r.double_click(at.center());
     assert_eq!(r.editing(), Some(keys));
