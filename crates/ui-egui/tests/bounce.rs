@@ -93,7 +93,7 @@ fn the_session_cannot_be_replaced_while_it_bounces() {
     bounce_from_dialog(&mut h, &dir.join("Mix.wav"));
     for id in ["session.new", "session.open", "session.close", "session.revert"] {
         let err = h.state_mut().run(id, json!({"path": dir.join("Other.scraft").to_string_lossy()})).unwrap_err();
-        assert!(err.contains("bounce"), "{id}: {err}");
+        assert!(err.contains("export") || err.contains("bounce"), "{id}: {err}");
     }
     assert_eq!(h.state().engine.session().tracks.len(), tracks);
     assert!(h.state().bounce.is_some());

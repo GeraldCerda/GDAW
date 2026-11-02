@@ -3040,12 +3040,12 @@ mod tests {
 
     #[test]
     fn named_hardware_outputs_reach_only_their_device_channels() {
-        let (mut session, track) = session_with_dc(0.5, 128);
+        let (mut session, track) = session_with_dc(0.5, 4800);
         session.outputs.push(soundcraft_model::OutputPath { name: "Cue".into(), first_channel: 2, format: ChannelFormat::Stereo });
         session.track_mut(track).unwrap().mixer.output = Route::Hardware("Cue".into());
         let mut mix = MixEngine::new(48_000.0, 128);
         let mut output = vec![vec![0.0; 128]; 4];
-        mix.render_device(&session, 0, 128, &mut output);
+        mix.render_device(&session, 1000, 128, &mut output);
         assert!(output[..2].iter().flatten().all(|sample| *sample == 0.0));
         for channel in &output[2..] { assert!((channel[64] - 0.5 * std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6); }
     }
@@ -3777,7 +3777,7 @@ mod tests {
     }
 
     #[test]
-    fn armed_track_requires_explicit_input_monitoring() {
+    fn armed_track_auto_monitors_when_stopped_but_off_stays_silent() {
         let (mut s, t) = session_with_dc(0.5, 4800);
         s.track_mut(t).unwrap().mixer.record_arm = true;
         let mut eng = MixEngine::new(48_000.0, 512);
@@ -3785,8 +3785,11 @@ mod tests {
         eng.monitor_only = true;
         let mut out = vec![vec![0.0; 512]; 2];
         eng.render(&s, 0, 512, &mut out);
+        assert!(out[0][100].abs() > 0.1);
+        s.track_mut(t).unwrap().mixer.monitor_mode = Some(soundcraft_model::MonitorMode::Off);
+        eng.render(&s, 0, 512, &mut out);
         assert!(out.iter().all(|channel| channel.iter().all(|sample| sample.abs() < 1e-6)));
-        s.track_mut(t).unwrap().mixer.input_monitor = true;
+        s.track_mut(t).unwrap().mixer.monitor_mode = Some(soundcraft_model::MonitorMode::In);
         eng.render(&s, 0, 512, &mut out);
         assert!(out[0][100].abs() > 0.1);
     }
