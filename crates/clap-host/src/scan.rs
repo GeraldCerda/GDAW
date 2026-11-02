@@ -13,6 +13,9 @@ const MAX_ENTRIES: usize = 100_000;
 /// The standard CLAP search locations for this OS (existing or not), followed by every entry
 /// of the `CLAP_PATH` environment variable.
 pub fn default_search_paths() -> Vec<PathBuf> {
+    if let Some(directory) = std::env::var_os("GDAW_PLUGIN_SCAN_TEST_ROOT") {
+        return vec![PathBuf::from(directory)];
+    }
     let mut v = os_search_paths(
         std::env::var_os("HOME").map(PathBuf::from),
         std::env::var_os("COMMONPROGRAMFILES").map(PathBuf::from),

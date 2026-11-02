@@ -44,4 +44,7 @@ jobs:
       - name: Run core and UI regressions
         env:
           CARGO_PROFILE_RELEASE_LTO: "off"
-        run: cargo +stable test --no-fail-fast --locked --release -p soundcraft-dsp -p soundcraft-model -p soundcraft-engine -p soundcraft-mix -p soundcraft-playback -p soundcraft-ui-egui
+          GDAW_PLUGIN_SCAN_TEST_ROOT: ${{ runner.temp }}/gdaw-empty-plugin-root
+        run: |
+          mkdir -p "$GDAW_PLUGIN_SCAN_TEST_ROOT"
+          cargo +stable test --no-fail-fast --locked --release -p soundcraft-dsp -p soundcraft-model -p soundcraft-engine -p soundcraft-mix -p soundcraft-playback -p soundcraft-ui-egui

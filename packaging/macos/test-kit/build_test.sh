@@ -79,10 +79,11 @@ if [ "$verify" != "0" ]; then
     else
         printf 'Formatting differences recorded in %s; continuing to compile and run the regression suites.\n' "$format_log"
     fi
+    mkdir -p "$kit_dir/plugin-tests-empty"
     if [ "$verify" = "2" ]; then
-        CARGO_PROFILE_RELEASE_LTO=off cargo +stable test --no-fail-fast --locked --release --target "$target" -p soundcraft-ui-egui
+        GDAW_PLUGIN_SCAN_TEST_ROOT="$kit_dir/plugin-tests-empty" CARGO_PROFILE_RELEASE_LTO=off cargo +stable test --no-fail-fast --locked --release --target "$target" -p soundcraft-ui-egui
     else
-        CARGO_PROFILE_RELEASE_LTO=off cargo +stable test --no-fail-fast --locked --release --target "$target" -p soundcraft-dsp -p soundcraft-model -p soundcraft-engine -p soundcraft-mix -p soundcraft-playback -p soundcraft-ui-egui
+        GDAW_PLUGIN_SCAN_TEST_ROOT="$kit_dir/plugin-tests-empty" CARGO_PROFILE_RELEASE_LTO=off cargo +stable test --no-fail-fast --locked --release --target "$target" -p soundcraft-dsp -p soundcraft-model -p soundcraft-engine -p soundcraft-mix -p soundcraft-playback -p soundcraft-ui-egui
     fi
 fi
 

@@ -36,6 +36,9 @@ impl Os {
 /// The standard VST3 search locations for this OS (existing or not), followed by every entry of
 /// the `VST3_PATH` environment variable.
 pub fn default_search_paths() -> Vec<PathBuf> {
+    if let Some(directory) = std::env::var_os("GDAW_PLUGIN_SCAN_TEST_ROOT") {
+        return vec![PathBuf::from(directory)];
+    }
     let mut v = os_search_paths(
         Os::current(),
         std::env::var_os("HOME").map(PathBuf::from),
