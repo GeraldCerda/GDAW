@@ -108,6 +108,8 @@ fn picks_without_the_search_still_close_the_menu() {
         assert!(h.query_by_label(category).is_none(), "a plugin from a category closes the menu");
     }
 
+    h.state_mut().ui.plugin_windows.clear();
+    h.run_steps(3);
     for (item, bypassed) in [("Bypass", Some(true)), ("no insert", None)] {
         h.get_by_label("Insert C").click_secondary();
         h.run_steps(3);
@@ -131,7 +133,7 @@ fn an_instrument_menu_searches_as_soon_as_it_opens() {
     press(&mut h, Key::Enter);
     let instrument = h.state().engine.session().tracks[0].instrument.clone().unwrap();
     assert_eq!(instrument.plugin, drums[0].id);
-    assert!(h.query_by_label(drums[0].name).is_none(), "picking closes the menu");
+    assert!(h.query_by_role_and_label(Role::TextInput, "Search instruments…").is_none(), "picking closes the menu");
 }
 
 #[test]
