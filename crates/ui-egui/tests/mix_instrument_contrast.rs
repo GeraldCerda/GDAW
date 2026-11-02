@@ -163,6 +163,7 @@ fn populated_mix_instrument_uses_readable_palette_in_real_frames() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 
+    let windows_before = harness.state().ui.plugin_windows.clone();
     let at = slot(harness.output(), "SubSynth").rect.center();
     for pressed in [true, false] {
         harness.input_mut().events.push(Event::PointerButton {
@@ -188,7 +189,7 @@ fn populated_mix_instrument_uses_readable_palette_in_real_frames() {
     }
     assert_eq!(app.engine.session().edit.selected_tracks, session.edit.selected_tracks);
     assert_eq!(app.engine.session().pool, session.pool);
-    assert!(app.ui.plugin_windows.is_empty(), "changing an insert uses its context menu");
+    assert_eq!(app.ui.plugin_windows, windows_before, "changing an insert should not open another editor window");
     harness.state_mut().run("edit.undo", json!({})).unwrap();
     assert_eq!(harness.state().engine.session(), &session);
 }

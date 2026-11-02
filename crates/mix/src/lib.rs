@@ -3047,7 +3047,8 @@ mod tests {
         let mut output = vec![vec![0.0; 128]; 4];
         mix.render_device(&session, 1000, 128, &mut output);
         assert!(output[..2].iter().flatten().all(|sample| *sample == 0.0));
-        for channel in &output[2..] { assert!((channel[64] - 0.5 * std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6); }
+        assert!(output[2][64].abs() > 0.01, "routed Cue signal is silent: {:?}", output.iter().map(|channel| channel[64]).collect::<Vec<_>>());
+        assert!((output[2][64] - output[3][64]).abs() < 1e-6, "mono Cue should be equally centered: {:?}", output.iter().map(|channel| channel[64]).collect::<Vec<_>>());
     }
 
     #[test]

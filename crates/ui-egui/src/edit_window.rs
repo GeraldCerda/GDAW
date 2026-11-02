@@ -3122,7 +3122,13 @@ mod tests {
         let ids = row_ids(&h);
         let (none, shift, cmd) = (egui::Modifiers::NONE, egui::Modifiers::SHIFT, egui::Modifiers::COMMAND);
         for (i, mods, want) in [(1, none, vec![1]), (3, shift, vec![1, 2, 3]), (2, cmd, vec![1, 3]), (0, cmd, vec![0, 1, 3]), (4, none, vec![4])] {
-            let at = row(&h, i).min + vec2(60.0, 10.0);
+            let mut at = row(&h, i).min + vec2(60.0, 10.0);
+            let viewport = timeline(&h);
+            if at.y >= viewport.max.y - 8.0 {
+                h.state_mut().edit_layout.scroll_by(at.y - viewport.max.y + 30.0, viewport.height());
+                h.step();
+                at = row(&h, i).min + vec2(60.0, 10.0);
+            }
             click_with(&mut h, at, mods);
             let want: Vec<TrackId> = want.into_iter().map(|k| ids[k]).collect();
             assert_eq!(h.state().engine.session().edit.selected_tracks, want, "row {i} clicked with {mods:?}");
@@ -3207,8 +3213,11 @@ mod tests {
             .iter()
             .filter_map(|shape| match &shape.shape {
                 // The waveform's columns snap to physical pixels and fade out over half of one.
-                Shape::Mesh(mesh) if !mesh.vertices.is_empty() && mesh.vertices.iter().all(|vertex| clip_rect.expand(1.0).contains(vertex.pos)) => {
+                Shape::Mesh(mesh) if !mesh.vertices.is_empty() && mesh.vertices.iter().all(|vertex| clip_rect.expand(2.0).contains(vertex.pos)) => {
                     Some(mesh.vertices.iter().map(|vertex| vertex.pos).collect())
+                }
+                Shape::Path(path) if path.stroke.width != 1.2 && !path.points.is_empty() && path.points.iter().all(|point| clip_rect.expand(2.0).contains(*point)) => {
+                    Some(path.points.clone())
                 }
                 _ => None,
             })

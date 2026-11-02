@@ -62,7 +62,7 @@ pub fn tracks_and_groups(app: &mut SoundApp, ui: &mut Ui) {
     };
     let hidden = egui::scroll_area::ScrollBarVisibility::AlwaysHidden;
     let lists =
-        egui::ScrollArea::vertical().id_salt("tracks_scroll").max_height(total * 0.62).auto_shrink([false, false]).scroll_bar_visibility(hidden);
+        egui::ScrollArea::vertical().id_salt("tracks_scroll").max_height(total * 0.62).auto_shrink([false, false]).drag_to_scroll(false).scroll_bar_visibility(hidden);
     let out = lists.show(ui, |ui| {
         for (id, name, shown, color, sel) in tracks {
             let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 17.0), Sense::click_and_drag());

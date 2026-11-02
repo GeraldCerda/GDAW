@@ -7,9 +7,9 @@ use soundcraft_ui_egui::{MainWindow, Services, SoundApp};
 
 fn right_click(h: &mut Harness<SoundApp>, at: Pos2) {
     h.hover_at(at);
-    for pressed in [true, false] {
-        h.event(Event::PointerButton { pos: at, button: PointerButton::Secondary, pressed, modifiers: Modifiers::NONE });
-    }
+    h.event(Event::PointerButton { pos: at, button: PointerButton::Secondary, pressed: true, modifiers: Modifiers::NONE });
+    h.run_steps(1);
+    h.event(Event::PointerButton { pos: at, button: PointerButton::Secondary, pressed: false, modifiers: Modifiers::NONE });
     h.run_steps(3);
 }
 
