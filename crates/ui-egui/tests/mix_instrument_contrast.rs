@@ -75,7 +75,7 @@ fn contrast(a: Color32, b: Color32) -> f64 {
 #[test]
 fn populated_mix_instrument_uses_readable_palette_in_real_frames() {
     let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
-    assert_eq!(app.ui.theme, ThemeMode::Light);
+    assert_eq!(app.ui.theme, ThemeMode::Dark);
     // Keep demo audio loaded for the preservation check while isolating the new strips.
     for track in &mut app.engine.session_mut().tracks {
         track.hidden = true;

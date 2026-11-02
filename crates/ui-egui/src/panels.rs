@@ -554,7 +554,7 @@ fn plugin_windows(app: &mut SoundApp, ctx: &egui::Context) {
             });
         if let Some(w) = shown
             && instrument
-            && ins.plugin == crate::sampler_window::SAMPLER
+            && !soundcraft_mix::is_third_party(&ins.plugin)
         {
             crate::sampler_window::drop_target(app, ctx, w.response.rect, tid);
         }
